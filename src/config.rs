@@ -331,6 +331,32 @@ fn config_path() -> Option<PathBuf> {
     Some(base.join("llmtrim").join("config.toml"))
 }
 
+/// Ledger age-retention in days, resolved **independently** of [`DenseConfig`] so selecting a
+/// preset never resets it (presets rebuild `DenseConfig` from `default()`). Resolution:
+/// `LLMTRIM_RETENTION_DAYS` (env) wins over a top-level `retention_days` key in the config
+/// file. `None` when unset or ≤ 0 — age retention off, leaving only the row cap to bound the
+/// ledger. The key is ignored by the compression config (no `deny_unknown_fields`).
+pub fn retention_days() -> Option<i64> {
+    if let Ok(v) = std::env::var("LLMTRIM_RETENTION_DAYS") {
+        if let Ok(days) = v.trim().parse::<i64>() {
+            return (days > 0).then_some(days);
+        }
+    }
+    let path = config_path().filter(|p| p.exists())?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    retention_days_from_toml(&value)
+}
+
+/// The `retention_days` key from a parsed config (positive only). Factored out so the
+/// file-parsing is unit-testable without touching env or the real config path.
+fn retention_days_from_toml(value: &toml::Value) -> Option<i64> {
+    value
+        .get("retention_days")
+        .and_then(toml::Value::as_integer)
+        .filter(|d| *d > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +505,33 @@ mod tests {
         assert!(!c.serialize);
         assert!(c.hygiene, "unset fields take the default");
         assert_eq!(c.serialize_min_rows, 2);
+    }
+
+    #[test]
+    fn retention_days_parses_positive_only() {
+        let p: toml::Value = toml::from_str("retention_days = 30").unwrap();
+        assert_eq!(retention_days_from_toml(&p), Some(30));
+        let zero: toml::Value = toml::from_str("retention_days = 0").unwrap();
+        assert_eq!(
+            retention_days_from_toml(&zero),
+            None,
+            "0 disables age retention"
+        );
+        let neg: toml::Value = toml::from_str("retention_days = -5").unwrap();
+        assert_eq!(retention_days_from_toml(&neg), None);
+        let absent: toml::Value = toml::from_str("hygiene = true").unwrap();
+        assert_eq!(retention_days_from_toml(&absent), None);
+    }
+
+    #[test]
+    fn retention_key_does_not_disturb_compression_config() {
+        // A config that only sets retention parses as the default compression config — the
+        // key is orthogonal and must not be rejected or alter stage flags.
+        let c =
+            DenseConfig::from_toml_value(toml::from_str("retention_days = 30").unwrap()).unwrap();
+        assert!(
+            c.hygiene && c.serialize,
+            "retention_days is ignored by DenseConfig"
+        );
     }
 }

@@ -553,8 +553,18 @@ mod imp {
         let (tx, rx) = std::sync::mpsc::channel::<Record>();
         std::thread::spawn(move || {
             if let Ok(tracker) = Tracker::open() {
+                // The daemon opens the ledger once, so the open-time prune never re-runs on
+                // its own. Re-prune every N writes to keep it bounded (row cap + any
+                // configured age retention) across a long-running daemon's uptime.
+                const PRUNE_EVERY: u64 = 1_000;
+                let mut since_prune: u64 = 0;
                 for rec in rx {
                     let _ = tracker.record(&rec);
+                    since_prune += 1;
+                    if since_prune >= PRUNE_EVERY {
+                        since_prune = 0;
+                        let _ = tracker.prune_default();
+                    }
                 }
             }
         });

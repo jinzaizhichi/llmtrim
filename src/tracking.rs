@@ -128,6 +128,10 @@ impl Summary {
     }
 }
 
+/// Default ledger row cap — the most-recent N compression events are retained. Each row is
+/// metadata only (~100 bytes), so this bounds the file to roughly 10-15 MB.
+pub const DEFAULT_MAX_ROWS: i64 = 100_000;
+
 pub struct Tracker {
     conn: Connection,
 }
@@ -149,8 +153,9 @@ impl Tracker {
             .with_context(|| format!("failed to open ledger at {}", path.display()))?;
         let tracker = Self { conn };
         tracker.migrate()?;
-        // Keep the long-running daemon's ledger bounded — retain the most recent rows only.
-        let _ = tracker.enforce_cap(100_000);
+        // Bound the ledger on open: row cap + (if configured) age retention. The daemon
+        // opens once and re-prunes periodically (see serve.rs); CLI paths prune per call.
+        let _ = tracker.prune_default();
         Ok(tracker)
     }
 
@@ -182,19 +187,44 @@ impl Tracker {
         Ok(())
     }
 
-    /// Trim the ledger to the most recent `cap` rows (no-op when under). Bounds unbounded
-    /// growth for the always-on daemon; analytics only need recent history.
-    fn enforce_cap(&self, cap: i64) -> Result<()> {
+    /// Apply retention to the ledger: drop rows older than `max_age_days` (when set), then
+    /// trim to the most recent `max_rows`. Returns the number of rows deleted. The ledger
+    /// holds only metadata (no prompt/response text), but it must still stay bounded for the
+    /// always-on daemon — analytics only need recent history.
+    pub fn prune(&self, max_rows: i64, max_age_days: Option<i64>) -> Result<u64> {
+        let mut deleted: u64 = 0;
+        // Age-based: `ts` is rfc3339 UTC (always `+00:00`), so a lexical `<` compare against
+        // the cutoff is a correct chronological compare — no date parsing needed.
+        if let Some(days) = max_age_days.filter(|d| *d > 0) {
+            let delta = chrono::TimeDelta::try_days(days).unwrap_or_else(chrono::TimeDelta::zero);
+            let cutoff = (chrono::Utc::now() - delta).to_rfc3339();
+            deleted += self
+                .conn
+                .execute("DELETE FROM compressions WHERE ts < ?1", params![cutoff])
+                .context("failed to age-prune ledger")? as u64;
+        }
+        // Row cap: keep only the most recent `max_rows` rows by id.
         let n: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM compressions", [], |row| row.get(0))?;
-        if n > cap {
-            self.conn.execute(
-                "DELETE FROM compressions WHERE id <= (SELECT MAX(id) - ?1 FROM compressions)",
-                params![cap],
-            )?;
+            .query_row("SELECT COUNT(*) FROM compressions", [], |row| row.get(0))
+            .context("failed to count ledger rows")?;
+        if n > max_rows {
+            deleted += self
+                .conn
+                .execute(
+                    "DELETE FROM compressions WHERE id <= (SELECT MAX(id) - ?1 FROM compressions)",
+                    params![max_rows],
+                )
+                .context("failed to cap-prune ledger")? as u64;
         }
-        Ok(())
+        Ok(deleted)
+    }
+
+    /// Prune with the default policy: the built-in row cap ([`DEFAULT_MAX_ROWS`]) plus the
+    /// configured age retention (`LLMTRIM_RETENTION_DAYS` env or `retention_days` in the
+    /// config file; `None` = age retention disabled, row cap only).
+    pub fn prune_default(&self) -> Result<u64> {
+        self.prune(DEFAULT_MAX_ROWS, crate::config::retention_days())
     }
 
     pub fn record(&self, r: &Record) -> Result<()> {
@@ -218,6 +248,32 @@ impl Tracker {
                 ],
             )
             .context("failed to record compression")?;
+        Ok(())
+    }
+
+    /// Test-only: insert a record stamped with an explicit `ts`, to exercise age retention
+    /// without waiting real time (`record` always stamps `now`).
+    #[cfg(test)]
+    fn record_with_ts(&self, r: &Record, ts: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO compressions
+                    (ts, provider, model, tokenizer, exact, input_before, input_after,
+                     output_before, output_after)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    ts,
+                    r.provider,
+                    r.model,
+                    r.tokenizer,
+                    i64::from(r.exact),
+                    r.input_before,
+                    r.input_after,
+                    r.output_before,
+                    r.output_after,
+                ],
+            )
+            .context("failed to record compression (test)")?;
         Ok(())
     }
 
@@ -491,5 +547,43 @@ mod tests {
         assert_eq!(oa.output_events, 2);
         assert_eq!(oa.output_after, 59);
         assert_eq!(oa.output_before, 0);
+    }
+
+    #[test]
+    fn prune_caps_to_most_recent_rows() {
+        let t = Tracker::open_in_memory().unwrap();
+        for _ in 0..10 {
+            t.record(&rec("openai", true, 10, 5)).unwrap();
+        }
+        let deleted = t.prune(4, None).unwrap();
+        assert_eq!(deleted, 6, "10 rows capped to 4 → 6 deleted");
+        assert_eq!(t.summary().unwrap().events, 4);
+    }
+
+    #[test]
+    fn prune_drops_rows_older_than_max_age() {
+        let t = Tracker::open_in_memory().unwrap();
+        // Three ancient rows (explicit old ts), two fresh.
+        for _ in 0..3 {
+            t.record_with_ts(&rec("openai", true, 10, 5), "2000-01-01T00:00:00+00:00")
+                .unwrap();
+        }
+        t.record(&rec("openai", true, 10, 5)).unwrap();
+        t.record(&rec("openai", true, 10, 5)).unwrap();
+
+        let deleted = t.prune(DEFAULT_MAX_ROWS, Some(30)).unwrap();
+        assert_eq!(deleted, 3, "only the three >30d-old rows are dropped");
+        assert_eq!(t.summary().unwrap().events, 2);
+    }
+
+    #[test]
+    fn prune_without_age_keeps_old_rows_within_cap() {
+        let t = Tracker::open_in_memory().unwrap();
+        t.record_with_ts(&rec("openai", true, 10, 5), "2000-01-01T00:00:00+00:00")
+            .unwrap();
+        // No age policy and under the cap → the ancient row survives.
+        let deleted = t.prune(DEFAULT_MAX_ROWS, None).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(t.summary().unwrap().events, 1);
     }
 }

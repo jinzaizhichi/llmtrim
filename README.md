@@ -131,6 +131,8 @@ llmtrim uninstall     # one command back out — reverses everything, transparen
 
 The proxy needs **no API key** (it forwards your tool's own auth). The CA is generated locally and **name-constrained to LLM API domains only** — it cannot forge a cert for anything else, and every other HTTPS connection blind-tunnels untouched. `llmtrim uninstall` is the exact inverse of `setup`: stops the daemon, disables autostart, strips the shell-profile block, removes the CA + binary — printing each step.
 
+**What it stores:** the only thing llmtrim persists locally is a **metadata-only** savings ledger (`~/.local/share/llmtrim/tracking.db`) — provider, model, and token *counts*, **never prompt or response text**. It's bounded to the most recent 100k events; add age-based pruning with `retention_days = N` in the config TOML (or `LLMTRIM_RETENTION_DAYS=N`). `llmtrim uninstall --purge` deletes it.
+
 <details>
 <summary><strong>More proxy commands</strong></summary>
 
