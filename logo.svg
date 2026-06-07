@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="144" height="117" viewBox="0 0 144 117" fill="none">
+  <!-- left block: tall, 8 segments (original payload) — color steps dark slate -> blue per bar -->
+  <path d="M8,0 H58 A8,8 0 0 1 66,8 V10 A2,2 0 0 1 64,12 H2 A2,2 0 0 1 0,10 V8 A8,8 0 0 1 8,0 Z" fill="#2B3A48"/>
+  <rect x="0" y="15" width="66" height="12" rx="2" fill="#304355"/>
+  <rect x="0" y="30" width="66" height="12" rx="2" fill="#344C62"/>
+  <rect x="0" y="45" width="66" height="12" rx="2" fill="#39556F"/>
+  <rect x="0" y="60" width="66" height="12" rx="2" fill="#3E5E7B"/>
+  <rect x="0" y="75" width="66" height="12" rx="2" fill="#436788"/>
+  <rect x="0" y="90" width="66" height="12" rx="2" fill="#477095"/>
+  <path d="M2,105 H64 A2,2 0 0 1 66,107 V109 A8,8 0 0 1 58,117 H8 A8,8 0 0 1 0,109 V107 A2,2 0 0 1 2,105 Z" fill="#4C79A2"/>
+
+  <!-- right block: short, 4 segments (compressed), bottom-aligned -->
+  <path d="M86,60 H136 A8,8 0 0 1 144,68 V70 A2,2 0 0 1 142,72 H80 A2,2 0 0 1 78,70 V68 A8,8 0 0 1 86,60 Z" fill="#2B3A48"/>
+  <rect x="78" y="75" width="66" height="12" rx="2" fill="#364F66"/>
+  <rect x="78" y="90" width="66" height="12" rx="2" fill="#416484"/>
+  <path d="M80,105 H142 A2,2 0 0 1 144,107 V109 A8,8 0 0 1 136,117 H86 A8,8 0 0 1 78,109 V107 A2,2 0 0 1 80,105 Z" fill="#4C79A2"/>
+</svg>

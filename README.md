@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.svg" alt="llmtrim" width="140">
+</p>
+
 <h1 align="center">llmtrim</h1>
 
 <p align="center">
