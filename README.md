@@ -31,7 +31,7 @@
 
 ---
 
-**llmtrim cuts your whole LLM bill ~46% — one install, any provider, zero extra model calls.** Output tokens **−73%**, input **−24%**, the cached prefix billed once, the answer unchanged — **87 live A/B cases, billed at real rates.**
+llmtrim is a deterministic HTTPS proxy that compresses the requests your AI tools send to any LLM API — and the answers they stream back. Zero extra model calls, no embeddings, no neural scoring — just a per-stage tokenizer gate that can never make your bill bigger.
 
 ## −46% of the bill — measured live, not estimated
 
@@ -50,8 +50,6 @@
 | **round-trip cost** | **$0.0167** | **$0.0090** | **−46%** |
 
 Every case is sent **twice** — once original, once compressed — both answers scored, the round-trip priced at real provider rates (`openai/gpt-oss-20b` via Groq). **Not estimated. Billed.** Pooled across 87 cases (generation, chat, reasoning, code, RAG, agents, summary, cache), the win is **both ends**: output collapses **−73%** (the expensive half), input trims **−24%** — most tools cut only one side. At n≈12/corpus the *per-corpus* deltas are noisy (the LLM-judge baseline alone swings ±30pp between runs), so read the pooled figure. **[Full methodology, per-corpus frontier + CIs →](bench/README.md)**
-
-llmtrim is a **static, deterministic, zero-LLM-call** compressor for closed LLM APIs — a transparent `HTTPS_PROXY` that intercepts the request your tools send to OpenAI / Anthropic / Gemini / any provider, shrinks it with deterministic algorithms only (**no auxiliary model, no embeddings, no neural scoring**), forwards it, and reverses the lossless transforms on the response. A per-stage tokenizer gate means it **can never make your bill bigger or break a call**. One install, every tool, every provider.
 
 ## Why llmtrim
 
