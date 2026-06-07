@@ -47,7 +47,10 @@ fn main() {
 
     let counter = llmtrim::tokenizer::counter_for(r.provider, r.model.as_deref()).unwrap();
     let value: serde_json::Value = serde_json::from_str(&input).unwrap();
-    let tools_str = value.get("tools").map(|t| t.to_string()).unwrap_or_default();
+    let tools_str = value
+        .get("tools")
+        .map(|t| t.to_string())
+        .unwrap_or_default();
     let bench = |label: &str, f: &dyn Fn()| {
         let t = Instant::now();
         for _ in 0..n {
