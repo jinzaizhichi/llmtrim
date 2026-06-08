@@ -129,6 +129,22 @@ mod imp {
         None
     }
 
+    /// Vertex AI serves all three wire shapes on `aiplatform.googleapis.com`, distinguished by
+    /// the request path: the OpenAI-compatible endpoint is `…/endpoints/openapi/chat/completions`,
+    /// `:rawPredict`/`:streamRawPredict` carries an Anthropic (Claude-on-Vertex) body, and
+    /// `:generateContent` (and its streaming form) a Gemini one. `None` for an unrecognized path.
+    fn vertex_kind(path: &str) -> Option<ProviderKind> {
+        if path.contains("openapi") || path.ends_with("/chat/completions") {
+            Some(ProviderKind::OpenAi)
+        } else if path.contains(":rawPredict") || path.contains(":streamRawPredict") {
+            Some(ProviderKind::Anthropic)
+        } else if path.contains(":generateContent") || path.contains(":streamGenerateContent") {
+            Some(ProviderKind::Google)
+        } else {
+            None
+        }
+    }
+
     /// True if the request carries an AWS SigV4 signature (its body is signed, so we must
     /// not modify it).
     fn is_body_signed(headers: &header::HeaderMap) -> bool {
@@ -309,7 +325,16 @@ mod imp {
             req: Request<Body>,
         ) -> RequestOrResponse {
             let host = host_of(&req);
-            let provider = host.as_deref().and_then(provider_for_host);
+            // Vertex AI serves all three wire shapes on one host, keyed by the path; every other
+            // host is host-derived. Either way the kind here is only the fallback — the body
+            // shape (`provider::detect`) refines it at compress time.
+            let provider = host.as_deref().and_then(|h| {
+                if h.ends_with("aiplatform.googleapis.com") {
+                    Some(vertex_kind(req.uri().path()).unwrap_or(ProviderKind::Google))
+                } else {
+                    provider_for_host(h)
+                }
+            });
             // Only compress POST bodies to a known provider; pass everything else through.
             let Some(provider) = provider.filter(|_| req.method() == Method::POST) else {
                 return req.into();
@@ -478,7 +503,9 @@ mod imp {
             return None;
         }
         let pending = Pending {
-            provider,
+            // The detected kind, not the host fallback — `handle_response` reads the response
+            // usage with this provider's field shapes, so it must match what we compressed as.
+            provider: kind,
             model: result.model.clone(),
             tokenizer: result.tokenizer_label.clone(),
             exact: result.tokenizer_exact,
@@ -1064,6 +1091,35 @@ mod imp {
             assert_eq!(
                 crate::provider::detect(&claude_body),
                 Some(ProviderKind::Anthropic)
+            );
+        }
+
+        #[test]
+        fn vertex_path_selects_wire_shape() {
+            // OpenAI-compatible endpoint.
+            assert_eq!(
+                vertex_kind(
+                    "/v1/projects/p/locations/us-central1/endpoints/openapi/chat/completions"
+                ),
+                Some(ProviderKind::OpenAi)
+            );
+            // Claude-on-Vertex (rawPredict).
+            assert_eq!(
+                vertex_kind(
+                    "/v1/projects/p/locations/l/publishers/anthropic/models/claude-opus-4:rawPredict"
+                ),
+                Some(ProviderKind::Anthropic)
+            );
+            // Gemini-on-Vertex (streaming generateContent).
+            assert_eq!(
+                vertex_kind(
+                    "/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-pro:streamGenerateContent"
+                ),
+                Some(ProviderKind::Google)
+            );
+            assert_eq!(
+                vertex_kind("/v1/projects/p/locations/l/operations/123"),
+                None
             );
         }
 
