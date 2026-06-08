@@ -68,6 +68,62 @@ impl TokenCounter for TiktokenCounter {
     }
 }
 
+/// A cheap, BPE-*shaped* token estimate for providers with no public tokenizer — one linear
+/// pass, no merge table (~100× faster than tiktoken). It captures the first-order behavior that
+/// drives the savings %: alphanumeric "words" are token-dense (~1 token / 4 chars), while
+/// punctuation and symbols are each roughly their own token. That's why it tracks
+/// structure-stripping stages (JSON→TOON, minify) — which a flat byte/char ratio under-counts
+/// ~2×, because it can't see that the punctuation a stage removes was token-dense. Whitespace is
+/// ~free (BPE folds a leading space into the next word). Unicode letters join word runs
+/// (CJK is over-merged, but these counts are flagged approximate and the savings % is what we
+/// report).
+fn estimate_tokens(text: &str) -> usize {
+    const CHARS_PER_WORD_TOKEN: usize = 4;
+    // Calibrate the raw word+punct count to o200k's scale: the raw estimate runs ~1.39× o200k
+    // on code and ~1× on prose, so 0.72 lands code (the dominant content for coding agents) on
+    // o200k. The savings % and the per-stage gate are calibration-invariant (it's a flat factor
+    // on both before and after) — this only fixes the absolute counts, so the priced $ stays
+    // honest instead of ~40% inflated, and the dashboard numbers don't jump.
+    const CALIB: f64 = 0.72;
+    let mut raw = 0usize;
+    let mut run = 0usize; // length of the current alphanumeric run
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            run += 1;
+        } else {
+            if run > 0 {
+                raw += run.div_ceil(CHARS_PER_WORD_TOKEN);
+                run = 0;
+            }
+            if !c.is_whitespace() {
+                raw += 1; // punctuation / symbol ≈ its own token
+            }
+        }
+    }
+    raw += run.div_ceil(CHARS_PER_WORD_TOKEN);
+    (raw as f64 * CALIB).round() as usize
+}
+
+/// Token counter for providers without a public tokenizer (Anthropic, Google): the cheap
+/// [`estimate_tokens`] heuristic, flagged approximate.
+pub struct ApproxCounter {
+    label: &'static str,
+}
+
+impl TokenCounter for ApproxCounter {
+    fn count(&self, text: &str) -> usize {
+        estimate_tokens(text)
+    }
+
+    fn is_exact(&self) -> bool {
+        false
+    }
+
+    fn label(&self) -> &str {
+        self.label
+    }
+}
+
 /// Build the token counter for a provider and optional model name.
 ///
 /// OpenAI uses tiktoken's own model→encoding registry (`bpe_for_model`) — so we
@@ -75,27 +131,28 @@ impl TokenCounter for TiktokenCounter {
 /// Anthropic has no public tokenizer, so o200k_base is used as a *flagged* proxy.
 /// Vocabs are cached `&'static` singletons (loaded once, lazily).
 pub fn counter_for(provider: ProviderKind, model: Option<&str>) -> Result<Box<dyn TokenCounter>> {
-    let (bpe, label, exact): (&'static CoreBPE, &'static str, bool) = match provider {
+    match provider {
+        // OpenAI ships the real tokenizer — use it exactly (its own model→encoding registry;
+        // unknown/newer models fall back to o200k_base).
         ProviderKind::OpenAi => {
             let bpe = model
                 .and_then(|m| tiktoken_rs::bpe_for_model(m).ok())
                 .unwrap_or_else(tiktoken_rs::o200k_base_singleton);
-            (bpe, "tiktoken", true)
+            Ok(Box::new(TiktokenCounter {
+                bpe,
+                label: "tiktoken",
+                exact: true,
+            }))
         }
-        ProviderKind::Anthropic => (
-            tiktoken_rs::o200k_base_singleton(),
-            "o200k-approx(anthropic)",
-            false,
-        ),
-        // Gemini's tokenizer (SentencePiece) has no local Rust port; use o200k as a BPE
-        // proxy and flag the counts approximate, same as Anthropic.
-        ProviderKind::Google => (
-            tiktoken_rs::o200k_base_singleton(),
-            "o200k-approx(google)",
-            false,
-        ),
-    };
-    Ok(Box::new(TiktokenCounter { bpe, label, exact }))
+        // No public tokenizer → the cheap BPE-shaped estimate (flagged approximate). Skips the
+        // BPE pass that dominated compress latency while still tracking structural savings.
+        ProviderKind::Anthropic => Ok(Box::new(ApproxCounter {
+            label: "approx(anthropic)",
+        })),
+        ProviderKind::Google => Ok(Box::new(ApproxCounter {
+            label: "approx(google)",
+        })),
+    }
 }
 
 #[cfg(test)]
