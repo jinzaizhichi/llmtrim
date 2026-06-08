@@ -208,6 +208,7 @@ fn main() -> Result<()> {
                     input_after: result.input_tokens_after.0 as i64,
                     output_before: None,
                     output_after: None,
+                    compress_micros: None,
                 });
             }
 
@@ -245,6 +246,7 @@ fn main() -> Result<()> {
                         input_after: result.input_tokens_after.0 as i64,
                         output_before: None,
                         output_after,
+                        compress_micros: None,
                     });
                 }
             }

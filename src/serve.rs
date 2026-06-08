@@ -133,6 +133,8 @@ mod imp {
         exact: bool,
         input_before: i64,
         input_after: i64,
+        /// Microseconds spent in `compress_with_config` — the latency we add before forwarding.
+        compress_micros: i64,
         /// Serialized rehydration plan. Reserved for reversible output-side transforms;
         /// none ship today (Stage D is input-only), so it currently reverses nothing.
         plan: String,
@@ -191,6 +193,7 @@ mod imp {
             input_after: p.input_after,
             output_before: None,
             output_after,
+            compress_micros: Some(p.compress_micros),
         }
     }
 
@@ -410,7 +413,9 @@ mod imp {
             if !text.trim_start().starts_with('{') {
                 return None;
             }
+            let started = std::time::Instant::now();
             let result = crate::compress_with_config(text, Some(provider), &self.config).ok()?;
+            let compress_micros = started.elapsed().as_micros() as i64;
             // Never forward a request larger than we received. On tiny or non-chat bodies
             // (e.g. token-count / auxiliary calls) the input-side stages can't offset the
             // output-control instruction's fixed cost, so the compressed form is a net token
@@ -426,6 +431,7 @@ mod imp {
                 exact: result.tokenizer_exact,
                 input_before: result.input_tokens_before.0 as i64,
                 input_after: result.input_tokens_after.0 as i64,
+                compress_micros,
                 plan: serde_json::to_string(&result.plan).unwrap_or_default(),
                 original: None,
             });

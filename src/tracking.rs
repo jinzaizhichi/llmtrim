@@ -22,6 +22,8 @@ pub struct Record {
     pub input_after: i64,
     pub output_before: Option<i64>,
     pub output_after: Option<i64>,
+    /// Microseconds spent compressing this request (proxy overhead); `None` for CLI paths.
+    pub compress_micros: Option<i64>,
 }
 
 /// Per-provider aggregate row.
@@ -98,6 +100,8 @@ pub struct Summary {
     pub output_before: i64,
     pub output_after: i64,
     pub output_events: i64,
+    /// Mean compression overhead (µs) across recorded requests; `None` if none recorded it.
+    pub avg_compress_micros: Option<f64>,
 }
 
 impl Summary {
@@ -180,10 +184,18 @@ impl Tracker {
                     input_before  INTEGER NOT NULL,
                     input_after   INTEGER NOT NULL,
                     output_before INTEGER,
-                    output_after  INTEGER
+                    output_after  INTEGER,
+                    compress_micros INTEGER
                 );",
             )
             .context("failed to migrate ledger schema")?;
+        // Additive column for ledgers created before latency tracking — the ALTER errors with
+        // "duplicate column" once it exists (and on fresh DBs the CREATE already has it), which
+        // we ignore.
+        let _ = self.conn.execute(
+            "ALTER TABLE compressions ADD COLUMN compress_micros INTEGER",
+            [],
+        );
         Ok(())
     }
 
@@ -233,8 +245,8 @@ impl Tracker {
             .execute(
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
-                     output_before, output_after)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     output_before, output_after, compress_micros)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     ts,
                     r.provider,
@@ -245,6 +257,7 @@ impl Tracker {
                     r.input_after,
                     r.output_before,
                     r.output_after,
+                    r.compress_micros,
                 ],
             )
             .context("failed to record compression")?;
@@ -259,8 +272,8 @@ impl Tracker {
             .execute(
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
-                     output_before, output_after)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     output_before, output_after, compress_micros)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     ts,
                     r.provider,
@@ -271,6 +284,7 @@ impl Tracker {
                     r.input_after,
                     r.output_before,
                     r.output_after,
+                    r.compress_micros,
                 ],
             )
             .context("failed to record compression (test)")?;
@@ -337,6 +351,15 @@ impl Tracker {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to read provider summary")?;
 
+        // Mean compression overhead; AVG ignores NULL (CLI rows / pre-latency ledgers), and
+        // returns NULL itself when nothing has it — mapped to None.
+        let avg_compress_micros: Option<f64> = self
+            .conn
+            .query_row("SELECT AVG(compress_micros) FROM compressions", [], |row| {
+                row.get(0)
+            })
+            .context("failed to average compression latency")?;
+
         Ok(Summary {
             events,
             input_before,
@@ -346,6 +369,7 @@ impl Tracker {
             output_before,
             output_after,
             output_events,
+            avg_compress_micros,
         })
     }
 
@@ -444,6 +468,7 @@ mod tests {
             input_after: after,
             output_before: None,
             output_after: None,
+            compress_micros: None,
         }
     }
 
@@ -505,6 +530,7 @@ mod tests {
             input_after: 60,
             output_before: None,
             output_after: Some(42),
+            compress_micros: Some(300),
         })
         .unwrap();
 
@@ -518,6 +544,7 @@ mod tests {
             input_after: 50,
             output_before: None,
             output_after: Some(17),
+            compress_micros: Some(500),
         })
         .unwrap();
 
@@ -537,6 +564,9 @@ mod tests {
 
         // output_before stays NULL → sums to 0.
         assert_eq!(s.output_before, 0);
+
+        // Mean compression overhead over the two timed rows (the rec() row is NULL → ignored).
+        assert_eq!(s.avg_compress_micros, Some(400.0));
 
         // Per-provider reflects the same aggregation.
         let oa = s

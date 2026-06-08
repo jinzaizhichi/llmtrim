@@ -264,6 +264,16 @@ pub fn snapshot(
         }
     }
 
+    if let Some(us) = s.avg_compress_micros {
+        o.push_str(&paint(
+            color,
+            DIM,
+            &format!(
+                " added latency ~{:.2} ms/req · llmtrim compression overhead\n",
+                us / 1000.0
+            ),
+        ));
+    }
     if s.any_approximate {
         o.push_str(&paint(
             color,
@@ -399,6 +409,7 @@ pub fn export_json(
                     "events": s.output_events, "saved_pct": s.output_saved_pct() },
         "cost": cost.map(|c| json!({ "saved_usd": c.saved, "spend_usd": c.spend, "round_trip_pct": c.pct(),
                                      "projected_saved_usd": c.projected_saved(), "projected_round_trip_pct": c.projected_pct() })),
+        "added_latency_ms": s.avg_compress_micros.map(|us| us / 1000.0),
         "approximate": s.any_approximate,
         "by_model": models.iter().map(|m| json!({
             "model": m.name, "requests": m.events, "saved_pct": m.saved_pct, "cost_saved_usd": m.cost_saved,
@@ -439,6 +450,7 @@ mod tests {
             output_before: 880_000,
             output_after: 229_000,
             output_events: 1204,
+            avg_compress_micros: Some(310.0),
         }
     }
 
@@ -481,6 +493,7 @@ mod tests {
         );
         assert!(out.contains("gpt-4o") && out.contains("$4.10"), "model row");
         assert!(out.contains("projected"), "projected label present");
+        assert!(out.contains("ms/req"), "added-latency line");
         assert!(!out.contains('\x1b'), "no ANSI when color=false");
     }
 
