@@ -12,7 +12,6 @@
   <a href="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml"><img src="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
-  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/fkiene/llmtrim/main/.github/badges/tests.json" alt="tests">
   <img src="https://img.shields.io/badge/round--trip_cost-%E2%88%9246%25-2ea043" alt="round-trip cost saved">
 </p>
 
