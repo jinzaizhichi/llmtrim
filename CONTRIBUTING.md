@@ -5,7 +5,7 @@ zero auxiliary model calls, every transform measured with the real target tokeni
 
 ## Ground rules
 
-The behavioral guidelines in [`CLAUDE.md`](CLAUDE.md) apply to humans too:
+Four principles guide every change:
 
 - **Simplicity first** — minimum code that solves the problem; no speculative abstraction.
 - **Surgical changes** — touch only what the change requires.

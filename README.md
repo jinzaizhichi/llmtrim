@@ -17,21 +17,21 @@
 </p>
 
 <p align="center">
-  <a href="#why-llmtrim">Why llmtrim</a> &bull;
-  <a href="#install">Install</a> &bull;
-  <a href="#run-it-and-forget-it">How it works</a> &bull;
-  <a href="#what-it-does-to-your-prompt">Stages</a> &bull;
-  <a href="#benchmark">Benchmark</a> &bull;
-  <a href="#security">Security</a> &bull;
-  <a href="#acknowledgments">Acknowledgments</a> &bull;
-  <a href="#license">License</a>
+  <a href="#-why-llmtrim">Why llmtrim</a> &bull;
+  <a href="#-install">Install</a> &bull;
+  <a href="#-run-it-and-forget-it">How it works</a> &bull;
+  <a href="#-what-it-does-to-your-prompt">Stages</a> &bull;
+  <a href="#-benchmark">Benchmark</a> &bull;
+  <a href="#-security">Security</a> &bull;
+  <a href="#-acknowledgments">Acknowledgments</a> &bull;
+  <a href="#-license">License</a>
 </p>
 
 ---
 
-llmtrim is a drop-in, deterministic HTTPS proxy that shrinks every LLM request and reply — **cheaper bills, faster responses, answers unchanged.** Any provider, zero extra model calls, no neural model or embeddings, ~0.1 ms overhead.
+A drop-in HTTPS proxy that compresses every LLM request and reply. **Any provider, answers unchanged, no model in the loop, ~0.1 ms overhead.**
 
-## −46% of the bill — measured live, not estimated
+## 💸 −46% of the bill — measured live, not estimated
 
 <p align="center">
   <picture>
@@ -47,42 +47,36 @@ llmtrim is a drop-in, deterministic HTTPS proxy that shrinks every LLM request a
 | total tokens | 86,106 | 51,883 | **−40%** |
 | **round-trip cost** | **$0.0167** | **$0.0090** | **−46%** |
 
-Every case is sent **twice** — once original, once compressed — both answers scored, the round-trip priced at real provider rates (`openai/gpt-oss-20b` via Groq). **Not estimated. Billed.** Pooled across 87 cases (generation, chat, reasoning, code, RAG, agents, summary, cache), the win is **both ends**: output collapses **−73%** (the expensive half), input trims **−24%** — most tools cut only one side. At n≈12/corpus the *per-corpus* deltas are noisy (the LLM-judge baseline alone swings ±30pp between runs), so read the pooled figure. **[Full methodology, per-corpus frontier + CIs →](bench/README.md)**
+Every case is sent **twice** — original vs compressed — both answers scored, priced at real provider rates (`openai/gpt-oss-20b` via Groq). **Billed, not estimated.**
 
-## Why llmtrim
+Pooled over 87 cases the win is **both ends** — input *and* output, where most tools cut one. Per-corpus deltas are noisy at n≈12; trust the pooled figure. **[Methodology + per-corpus frontier →](bench/README.md)**
 
-There are three places a request bleeds tokens. Most tools fix exactly one.
+## 🎯 Why llmtrim
 
-```
-   you ─▶ [ REQUEST ] ─▶ LLM ─▶ [ RESPONSE ] ─▶ you
-            ▲                       ▲
-            └─────── llmtrim ───────┘   input + output + cache · any provider
-   rtk ........ tool output only — local CLI, before it re-enters the REQUEST
-   caveman .... model output only — English-prose instruction
-```
+A request bleeds tokens in three places — **most tools fix one, llmtrim fixes all three:**
 
-rtk and caveman are both good at their one layer. llmtrim covers the layer they can't — **the API round-trip itself** — and does it deterministically, with a gate that means it **can never make your bill bigger**.
+- **Input** — system prompt, tool schemas (resent every turn), history
+- **Output** — the model's reply, the expensive half
+- **Cache** — the invariant prefix, else re-billed in full
+
+rtk and caveman each compress one layer. llmtrim does the whole round-trip — deterministically, behind a gate that **can't make your bill bigger.**
 
 | | [rtk](https://github.com/rtk-ai/rtk) | [caveman](https://github.com/JuliusBrussee/caveman) | **llmtrim** |
 |---|---|---|---|
 | Compresses | local CLI tool output | model output (prose) | **the whole round-trip: input + output + cache + batch** |
-| Sits at | Bash-tool hook | system-prompt skill | **network layer (HTTPS proxy)** |
 | Touches the actual API request | no | no — *adds* to it | **yes** |
 | Coverage | 60 known commands | English caveman prose | **any payload · any language · any provider** |
 | Per-call instruction cost | n/a | a **528-word** skill prompt | **one 12-word sentence** (rides the cached prefix) |
 | Can it increase your bill? | no (passthrough) | possible — skill prompt is added input | **no — per-stage tokenizer gate auto-reverts** |
-| Can it break a call? | no | no | **no — replays the original on any upstream reject** |
 | Quality measured? | no | tokens only | **yes — live A/B (saved *and* retained)** |
-| Their own headline | −80% CLI output | −65% output | **−46% round-trip cost** |
-| Extra model calls | 0 | 0 | **0** |
+| % is measured on | a CLI command's output | the model's reply | **the entire bill** |
 
-**vs caveman — output compression is its whole game, and llmtrim matches it.** Output tokens **−73%** on our 87-case live A/B vs caveman's reported **−65%** on theirs — different models and corpora, so *same ballpark*, not a knockout. The difference is everything *around* the savings. llmtrim also cuts **input**; caveman touches output only (its own README is candid the win is "readability and speed, cost a bonus"). llmtrim's terse lever is a single neutral sentence on the cacheable prefix — when we A/B'd a *forceful telegraphic style* (caveman's approach) it **backfired**: empty replies and hallucinated `because X` padding, so we kept the neutral instruction. And llmtrim works in any language, where caveman is English caveman-speak. Same output savings, fewer ways to lose — measured, not asserted.
+**Net — different layers, run all three.** llmtrim compresses the API round-trip neither touches: e.g. **−35% input** on Claude Code's resent tool schemas, and it stacks on top.
+*(We A/B'd caveman's forceful telegraphic style — it backfired: empty replies, hallucinated padding. We ship a neutral one-liner instead.)*
 
-**vs rtk — different layer, run both.** rtk is excellent at what it does: command-aware filtering of 60 CLI tools, −80% on their output. But it only fires on the Bash path, only for commands it has a filter for, and it never sees the API request. llmtrim compresses the request that actually hits the API — the system prompt, the **tool schemas resent every turn** (−35% input on Claude Code with tools intact), the message history, the structured payloads — generically, with no per-command filters, for any tool and any provider. rtk shrinks what your shell hands back; llmtrim shrinks what leaves the machine. They stack.
+> **The guarantee neither has:** every stage is checked by the real tokenizer before it ships. No net token win → auto-revert. Upstream rejects it → replay the original verbatim. Worst case is *no savings* — never a bigger bill, never a broken call.
 
-> **The guarantee neither competitor has:** every input stage is measured with the **real tokenizer** before it ships. If a transform doesn't net fewer tokens — counting the legend/instruction it injects — it auto-reverts to the original. If the upstream rejects the compressed request, the proxy replays the original verbatim. Worst case is *no savings*. Never a bigger bill, never a broken call.
-
-## Install
+## ⚡ Install
 
 ```bash
 # Prebuilt binary (Linux / macOS) — installs and runs `setup` for you
@@ -95,13 +89,11 @@ cargo install --git https://github.com/fkiene/llmtrim
 brew install fkiene/tap/llmtrim
 ```
 
-**Windows:** native — `cargo install --git https://github.com/fkiene/llmtrim`, then `llmtrim setup` wires the PowerShell `$PROFILE` (`$env:HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS`), trusts the local CA (`certutil -addstore -user Root`), enables autostart, and runs the daemon (`status` / `stop` via `tasklist` / `taskkill`); or run [`install.ps1`](install.ps1). **WSL** is the simplest, most-tested path if you already use it.
+**Windows:** native — run [`install.ps1`](install.ps1), or `cargo install --git https://github.com/fkiene/llmtrim && llmtrim setup`. **WSL** is the simplest path. Full options (PATH, pinned versions, build-from-source) in [INSTALL.md](INSTALL.md).
 
-Full options (PATH, pinned versions, build-from-source) in [INSTALL.md](INSTALL.md).
+## 🔧 Run it and forget it
 
-## Run it and forget it
-
-llmtrim is a **man-in-the-middle HTTPS proxy** — like mitmproxy, but compressing. It never touches a single IDE setting. One command wires everything:
+A man-in-the-middle HTTPS proxy — like mitmproxy, but compressing. No IDE settings touched; one command wires it:
 
 ```bash
 llmtrim setup     # local CA + HTTPS_PROXY/NODE_EXTRA_CA_CERTS in your shell profile + autostart + start
@@ -111,12 +103,12 @@ llmtrim setup     # local CA + HTTPS_PROXY/NODE_EXTRA_CA_CERTS in your shell pro
   without llmtrim:                              with llmtrim:
 
   tool ──request──▶ LLM API                     tool ──request──▶ llmtrim ──compressed──▶ LLM API
-   ▲                  │                           ▲                  │  (gate · stream)     │
+   ▲                  │                           ▲                  │  (gate · stream)      │
    └──── response ────┘                           └──── response ────┴── pass-through ───────┘
         full bill                                          −46% bill, answer unchanged
 ```
 
-Open a new shell and your tools route through it. Then:
+Open a new shell — your tools route through it. Then:
 
 ```bash
 llmtrim monitor       # savings dashboard: ● running · $ saved · −% round-trip · by-model
@@ -124,9 +116,7 @@ llmtrim monitor --watch   # live, refreshing — watch the bill shrink in real t
 llmtrim uninstall     # one command back out — reverses everything, transparently
 ```
 
-The proxy needs **no API key** (it forwards your tool's own auth). The CA is generated locally and **name-constrained to LLM API domains only** — it cannot forge a cert for anything else, and every other HTTPS connection blind-tunnels untouched. `llmtrim uninstall` is the exact inverse of `setup`: stops the daemon, disables autostart, strips the shell-profile block, removes the CA + binary — printing each step.
-
-**What it stores:** the only thing llmtrim persists locally is a **metadata-only** savings ledger (`~/.local/share/llmtrim/tracking.db`) — provider, model, and token *counts*, **never prompt or response text**. It's bounded to the most recent 100k events; add age-based pruning with `retention_days = N` in the config TOML (or `LLMTRIM_RETENTION_DAYS=N`). `llmtrim uninstall --purge` deletes it.
+`uninstall` is the exact inverse of `setup` — stops the daemon, strips the shell-profile block, removes CA + binary, printing each step. No API key (it forwards your tool's own auth); safe by construction — local name-constrained CA, only a metadata-only counts ledger on disk ([Security →](#-security)).
 
 <details>
 <summary><strong>More proxy commands</strong></summary>
@@ -141,17 +131,23 @@ llmtrim ca               # print the CA path + how to trust it system-wide (for 
 llmtrim monitor --daily  # time-series report (--weekly/--monthly); --json/--csv to export
 ```
 
-`monitor` is the one savings view — snapshot, `--watch` live dashboard, `--daily/--weekly/--monthly` reports, `--json/--csv` export. (`status` and `gain` are kept as aliases.)
+`monitor` is the one savings view — snapshot, `--watch`, `--daily/--weekly/--monthly`, `--json/--csv` export (`status`/`gain` are aliases).
 
-**It works with any tool** that respects `HTTPS_PROXY` + a custom CA from the environment — essentially every CLI coding agent and Node/VS Code tool. The intercepted host list is derived from the [`llm_providers`](https://crates.io/crates/llm_providers) registry — OpenAI, Anthropic, Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen, MiniMax, Cerebras, OpenRouter, … — and updates with the crate. Tools that hardcode their endpoint or pin certs (e.g. Copilot) can't be intercepted.
+**Any tool** honoring `HTTPS_PROXY` + an env CA works (every CLI agent, Node/VS Code). The host list comes from the [`llm_providers`](https://crates.io/crates/llm_providers) registry — OpenAI, Anthropic, Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen, MiniMax, Cerebras, OpenRouter, … — and updates with the crate. Pinned-cert tools (e.g. Copilot) can't be intercepted.
 
-**The interceptor defaults to `auto`** — shape-routing: each request goes to the preset matching its shape (tools → `agent`, fenced code → `code`, long context + a question → `rag`, else → `aggressive`), so the per-shape wins land without misfiring. Safe on real client traffic because the breakers are in place — the `cache` stage skips a client managing its own `cache_control` (no 400s), `retrieve` protects directive blocks, and `tool_select` never drops a tool already invoked in the conversation. On agent traffic the `agent` preset's **tool-description trimming** is the big lever: clients resend long tool schemas every call, so trimming them cuts ~35% of input with tool use intact. Override any of it with a config file.
+**Default `auto`** [routes each request to its shape's preset](#-what-it-does-to-your-prompt) — safe on live traffic via breakers:
+
+- `cache` skips a client managing its own `cache_control` (no 400s)
+- `retrieve` protects directive blocks
+- `tool_select` never drops an already-invoked tool
+
+On agent traffic, `agent`'s **tool-description trimming** is the big lever — clients resend long tool schemas every call.
 
 </details>
 
-## What it does to your prompt
+## 🧩 What it does to your prompt
 
-Nine stages, ordered by the savings hierarchy `retrieve > cache > output control > serialization > structural skeleton > dedup > micro-text`. Each runs only if the **real-tokenizer gate** confirms a net win; anything that errors reverts. Compression uses vetted crates (`tiktoken-rs`, `toon-format`, `bm25`, `gaoya`, `tree-sitter`, `pest`, `image`, `unicode-normalization`, `whatlang`) — no hand-rolled parsers.
+Nine stages, ordered by the savings hierarchy `retrieve > cache > output > serialization > skeleton > dedup > micro-text`. Each fires only if the real-tokenizer gate nets a win.
 
 | Stage | Lever | What it does | When it runs |
 |---|---|---|---|
@@ -165,13 +161,11 @@ Nine stages, ordered by the savings hierarchy `retrieve > cache > output control
 | **H** multimodal | multimodal | downscale images to the provider's effective resolution cap (quality-neutral by construction); tile-snap | **auto · images** |
 | **I** batch | transport | stacks on the provider's ~50% Batch-API discount | `batch` cmd |
 
-*The **When it runs** column is what the default (`auto`) does, with zero config. **always** = every request (the lossless stages D · E). **auto · &lt;shape&gt;** = the default switches it on for the matching request — long context, code, tool/agent calls, or an embedded image. **auto** (F) = on broadly. Nothing is ever "off" under the default — each stage fires exactly where it pays. The bar is **cost with no measured quality loss**, not losslessness; the **`safe`** preset runs only the lossless stages (byte-faithful round-trip).*
+*Default `auto` switches each stage on only where it pays (the **When it runs** column). `safe` runs the lossless stages only — byte-faithful round-trip. [Full config →](#-configuration)*
 
-**The default is `auto`** — it reads the request shape and applies the proven preset (tools → `agent`, fenced code → `code`, long context + a question → `rag`, else → `aggressive`), all zero-model, falling back to lossless `safe` when nothing fits. `safe`/`DenseConfig::default()` is the opt-in **lossless** mode (guaranteed byte-faithful). <a href="#configuration">Full config →</a>
+## 🛠️ One-shot & library
 
-## One-shot & library
-
-The pure transform core (no I/O) underlies the proxy and the CLI:
+Same transform core, no proxy:
 
 ```bash
 echo '{"model":"gpt-4o","messages":[...]}' | llmtrim compress --provider openai > out.json
@@ -190,13 +184,16 @@ println!("{} -> {} input tokens", result.input_tokens_before, result.input_token
 let result = compress_with_config(request_json, Some(ProviderKind::OpenAi), &DenseConfig::default())?;
 ```
 
-## Benchmark
+## 🔬 Benchmark
 
-Two axes, measured live: **tokens saved** (real tokenizer, at compress time) and **quality retained** (the A/B delta between the model's answer on the *original* vs the *compressed* request). A preset is only honest if quality holds at its saving — the frontier of (saved, retained) is the benchmark, not the saving alone.
+Two axes, both measured live:
 
-The per-corpus frontier (cost saved + quality retention, with confidence intervals) lives in **[bench/README.md](bench/README.md)**. At **n≈12/corpus the per-corpus deltas are noisy** — the LLM-judge baseline alone swings ±30pp between runs — so the **pooled** figure (−46% cost / −73% output) is the trustworthy one; the per-corpus view shows the *shape* of where compression pays (output-heavy generation/chat/reasoning) vs where it can't (cache, short extractive RAG).
+- **tokens saved** — real tokenizer, at compress time
+- **quality retained** — A/B delta between the answer on the *original* vs *compressed* request
 
-Scored ground-truth where possible — numeric-exact (math), **pass@1 that runs the unit tests** (code) — plus token-F1 (QA), tool-call match (agents), LLM judge (open-ended). The per-stage token gate *guarantees fewer tokens, not preserved quality* — only this A/B axis catches the difference, which is why every lossy stage is gated on it.
+A preset is honest only if quality holds at its saving — the (saved, retained) frontier is the benchmark, not the saving alone. Full per-corpus frontier + CIs in **[bench/README.md](bench/README.md)**; it shows where compression pays (output-heavy generation/chat/reasoning) vs where it can't (cache, short extractive RAG).
+
+Scored on ground truth where possible — numeric-exact (math), **pass@1 running the unit tests** (code) — plus token-F1 (QA), tool-call match (agents), LLM judge (open-ended).
 
 ```bash
 python3 bench/scripts/download.py 40   # pull + hash real corpora (gsm8k, humaneval, dolly, hotpotqa, glaive, ultrachat, cnn)
@@ -204,18 +201,18 @@ bash    bench/scripts/run_all.sh       # live A/B (needs OPENROUTER_API_KEY; bui
 python3 bench/scripts/chart.py         # regenerate the chart + table
 ```
 
-## Configuration
+## 📊 Configuration
 
-**Zero config needed** — the default is `auto` (shape-routing). To pick a profile, set **one line**: `preset = "<name>"` in the config TOML (`$LLMTRIM_CONFIG` or `$XDG_CONFIG_HOME/llmtrim/config.toml`), or `LLMTRIM_PRESET=<name>` in the env.
+**Zero config needed** — default `auto` shape-routes every request. To force a profile, set one line: `preset = "<name>"` (config TOML at `$LLMTRIM_CONFIG` or `$XDG_CONFIG_HOME/llmtrim/config.toml`) or `LLMTRIM_PRESET=<name>`.
 
 | preset | for |
 | --- | --- |
-| **`auto`** *(default)* | shape-routes each request to the proven profile — the right answer for almost everyone |
-| **`safe`** | lossless only — byte-faithful round-trip (turns the lossy stages off) |
+| **`auto`** *(default)* | shape-routes each request to the proven profile — right for almost everyone |
+| **`safe`** | lossless only — byte-faithful round-trip (lossy stages off) |
 
-**For a known workload**, name a specialized profile: `reasoning` (math / step-by-step — Chain-of-Draft) · `cache` (a fixed system prefix reused across calls — Stage A prefix caching).
+**Known workload?** Name a profile: `reasoning` (math / step-by-step) · `cache` (a fixed prefix reused across calls).
 
-`auto` already routes to `rag` / `agent` / `code` / `aggressive` per request shape, so naming those yourself rarely helps — **`aggressive` in particular just forces *every* lever onto *every* request**: identical to `auto` on plain prose, *riskier* on tools/code/RAG (which is exactly why `auto` routes RAG to `rag`, not `aggressive`). They stay nameable for experts but aren't recommended. A `preset` and raw flags are alternatives — `preset` wins; omit it to hand-tune the flags below.
+Under the hood `auto` routes by shape — tools → `agent`, code → `code`, long-context + question → `rag`, else → `aggressive`. Naming one yourself rarely helps; **`aggressive` just forces every lever onto every request** — same as `auto` on prose, riskier on tools/code/RAG. Power users can still hand-tune raw flags (`preset` wins over flags).
 
 <details>
 <summary><strong>Advanced — per-flag overrides (alternative to a preset)</strong></summary>
@@ -248,33 +245,36 @@ python3 bench/scripts/chart.py         # regenerate the chart + table
 | `skeletonize` / `minify_code` | `false` | Stage C drop bodies / strip indentation (lossless) |
 | `multimodal` / `image_detail` | `false` | Stage H downscale to the provider's cap |
 
-Env: `LLMTRIM_PRESET` (select a preset by name), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB_PATH` (ledger location).
+Env: `LLMTRIM_PRESET` (preset by name), `LLMTRIM_CONFIG` (config-file path), `LLMTRIM_DB_PATH` (ledger location).
 
 </details>
 
-## Security
+## 🔒 Security
 
-llmtrim sits between your tool and the provider, so its trust model *is* the product. Full policy + threat model in **[SECURITY.md](SECURITY.md)**; the essentials:
+llmtrim sits between your tool and the provider — its trust model *is* the product. Full threat model in **[SECURITY.md](SECURITY.md)**:
 
-- **Local CA, name-constrained.** Generated on your machine (`~/.llmtrim/ca.pem`, key `0600`) and X.509-constrained to LLM API domains — it **cannot mint a cert for any other host**, even if the key were stolen. Trusted per-tool via `NODE_EXTRA_CA_CERTS`, not system-wide; every non-LLM HTTPS connection blind-tunnels untouched.
-- **No keys, no prompts on disk.** The proxy forwards your tool's own auth (needs no key of its own); prompt and response text stay in memory — never logged, never persisted.
-- **Binds `127.0.0.1` only** — no client authentication; never expose it on a public interface.
-- **Metadata-only ledger** — token counts, provider, model id. Never prompt or response text. `llmtrim uninstall --purge` deletes it.
+- **Local CA, name-constrained.** Generated on your machine (`~/.llmtrim/ca.pem`, key `0600`), X.509-constrained to LLM API domains — **can't mint a cert for any other host**, even if the key were stolen. Trusted per-tool via `NODE_EXTRA_CA_CERTS`; every non-LLM connection blind-tunnels untouched.
+- **No keys, no prompts on disk.** Forwards your tool's own auth; prompt/response text stays in memory — never logged, never persisted.
+- **Binds `127.0.0.1` only** — no client auth; never expose it on a public interface.
+- **Metadata-only ledger** (`~/.local/share/llmtrim/tracking.db`) — provider, model, token *counts*, never content. Cap 100k events; `retention_days = N` to age-prune; `uninstall --purge` wipes it.
 
-Report vulnerabilities **privately** via a [GitHub security advisory](https://github.com/fkiene/llmtrim/security/advisories/new), not a public issue.
+Report vulnerabilities **privately** via a [security advisory](https://github.com/fkiene/llmtrim/security/advisories/new), not a public issue.
 
-## Known limits
+## ⚠️ Known limits
 
-Honesty is the product. The same A/B that proves the savings is the one that surfaces these:
+Honesty is the product — the same A/B that proves the savings surfaces these:
 
-- **Anthropic / Gemini token counts are approximate** — no public exact tokenizer, so an o200k BPE proxy is used and flagged (`is_exact() == false`, surfaced in `gain`). OpenAI is exact (tiktoken).
-- **Output savings aren't measured live** — the proxy compresses the input prompt; an output *saving* needs the A/B counterfactual, which only the offline `bench` has. `status` shows captured output + total spend, but "saved" is input-side.
-- **The default is quality-gated, not lossless.** The bar is *cost with no measured quality regression* — so the shipped default (`auto`) runs lossy stages (output control everywhere; retrieval / skeleton / dedup per shape) wherever the [eval](bench/README.md) shows quality holds. The per-stage **token** gate guarantees fewer tokens, **not** quality — quality is proven offline and baked into the routing. Need a guaranteed byte-faithful round-trip? Use the **`safe`** preset (lossless only). When you raise a drop ratio yourself, read the frontier first.
-- **`rusqlite` is held at 0.39** — 0.40+ pulls `libsqlite3-sys` 0.38, whose build script uses the still-unstable `cfg_select` ([rust#115585](https://github.com/rust-lang/rust/issues/115585)) and won't compile on stable Rust.
+- **Anthropic / Gemini counts are approximate** — no public exact tokenizer, so an o200k BPE proxy is used and flagged (`is_exact() == false`, surfaced in `gain`). OpenAI is exact (tiktoken).
+- **Output savings aren't measured live** — the proxy compresses input; an output *saving* needs the A/B counterfactual, which only offline `bench` has. `status` "saved" is input-side.
+- **Default is quality-gated, not lossless** — lossy stages run where the [eval](bench/README.md) shows quality holds; the token gate ensures fewer tokens, not quality. Want a byte-faithful round-trip? Use **`safe`**.
+- **`rusqlite` pinned at 0.39** — 0.40+ pulls `libsqlite3-sys` 0.38, whose build script needs the still-unstable `cfg_select` ([rust#115585](https://github.com/rust-lang/rust/issues/115585)) and won't build on stable.
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
-llmtrim's levers are deterministic implementations of published research — the engineering and the real-tokenizer gate are ours, the ideas are theirs. Each stage cites its source:
+Every lever is a deterministic implementation of published research — the ideas are theirs, the engineering and the real-tokenizer gate are ours.
+
+<details>
+<summary><strong>Papers + crates behind each stage</strong></summary>
 
 **Retrieval & context (Stage B)**
 - **BM25** — Robertson & Zaragoza, *The Probabilistic Relevance Framework: BM25 and Beyond* (2009) · [`bm25`](https://crates.io/crates/bm25)
@@ -301,8 +301,8 @@ llmtrim's levers are deterministic implementations of published research — the
 
 Built on the Rust ecosystem: [`tiktoken-rs`](https://crates.io/crates/tiktoken-rs), [`toon-format`](https://crates.io/crates/toon-format), [`bm25`](https://crates.io/crates/bm25), [`gaoya`](https://crates.io/crates/gaoya), [`tree-sitter`](https://crates.io/crates/tree-sitter), [`pest`](https://crates.io/crates/pest), [`image`](https://crates.io/crates/image), [`unicode-normalization`](https://crates.io/crates/unicode-normalization), [`whatlang`](https://crates.io/crates/whatlang), [`hudsucker`](https://crates.io/crates/hudsucker), [`rusqlite`](https://crates.io/crates/rusqlite).
 
-## License
+</details>
 
-llmtrim is licensed under [**AGPL-3.0-only**](LICENSE). You may use, modify, and self-host it freely; if you run a **modified** version as a network service, the AGPL requires you to release your source under the same license.
+## 📄 License
 
-Contributions are accepted under the AGPL with a [DCO](CONTRIBUTING.md#sign-your-commits-dco) sign-off.
+[**AGPL-3.0-only**](LICENSE) — use, modify, and self-host freely; run a **modified** version as a network service and the AGPL requires you to release your source under the same license. Contributions via [DCO](CONTRIBUTING.md#sign-your-commits-dco) sign-off.
