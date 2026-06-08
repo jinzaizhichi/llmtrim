@@ -56,34 +56,34 @@ A drop-in HTTPS proxy that compresses every LLM request and reply. **Any provide
   </tbody>
 </table>
 
-Every case is sent **twice**: original vs compressed - both answers scored, priced at real provider rates (`openai/gpt-oss-20b` via Groq). **Billed, not estimated.**
+Every case is sent twice: the original request and the compressed one. Both answers are scored and priced at real provider rates (`openai/gpt-oss-20b` via Groq).
 
-Pooled over 87 cases the win is **both ends**: input *and* output, where most tools cut one. Per-corpus deltas are noisy at n≈12; trust the pooled figure. **[Methodology + per-corpus frontier →](bench/README.md)**
+Pooled over 87 cases the win is both ends: input and output. Per-corpus deltas are noisy at n≈12; trust the pooled figure. [Methodology + per-corpus frontier →](bench/README.md)
 
 ## 🎯 Why llmtrim
 
-A request bleeds tokens in three places - **most tools fix one, llmtrim fixes all three:**
+A request bleeds tokens in three places. Most tools fix one; llmtrim fixes all three:
 
 - **Input**: system prompt, tool schemas (resent every turn), history
 - **Output**: the model's reply, the expensive half
 - **Cache**: the invariant prefix, else re-billed in full
 
-rtk and caveman each compress one layer. llmtrim does the whole round-trip - deterministically, behind a gate that **can't make your bill bigger.**
+rtk and caveman each compress one layer. llmtrim does the whole round-trip, deterministically, behind a gate that can't make your bill bigger.
 
 | | [rtk](https://github.com/rtk-ai/rtk) | [caveman](https://github.com/JuliusBrussee/caveman) | **llmtrim** |
 |---|---|---|---|
-| Compresses | local CLI tool output | model output (prose) | **the whole round-trip: input + output + cache** |
-| Touches the actual API request | no | no - *adds* to it | **yes** |
-| Coverage | 60 known commands | English caveman prose | **any payload · any language · any provider** |
-| Per-call instruction cost | n/a | a **528-word** skill prompt | **one 12-word sentence** (rides the cached prefix) |
-| Can it increase your bill? | no (passthrough) | possible - skill prompt is added input | **no - per-stage tokenizer gate auto-reverts** |
-| Quality measured? | no | tokens only | **yes - live A/B (saved *and* retained)** |
-| % is measured on | a CLI command's output | the model's reply | **the entire bill** |
+| Compresses | local CLI tool output | model output (prose) | the whole round-trip: input + output + cache |
+| Touches the actual API request | no | no, *adds* to it | yes |
+| Coverage | 60 known commands | English caveman prose | any payload · any language · any provider |
+| Per-call instruction cost | n/a | a 528-word skill prompt | one 12-word sentence (rides the cached prefix) |
+| Can it increase your bill? | no (passthrough) | possible, skill prompt is added input | no, per-stage tokenizer gate auto-reverts |
+| Quality measured? | no | tokens only | yes, live A/B (saved *and* retained) |
+| % is measured on | a CLI command's output | the model's reply | the entire bill |
 
-**Net - different layers, run all three.** llmtrim compresses the API round-trip neither touches: e.g. **−35% input** on Claude Code's resent tool schemas, and it stacks on top.
-*(We A/B'd caveman's forceful telegraphic style - it backfired: empty replies, hallucinated padding. We ship a neutral one-liner instead.)*
+Net: different layers, run all three. llmtrim compresses the API round-trip neither touches: e.g. −35% input on Claude Code's resent tool schemas, and it stacks on top.
+*(We A/B'd caveman's forceful telegraphic style; it backfired with empty replies and hallucinated padding. We ship a neutral one-liner instead.)*
 
-> **The guarantee neither has:** every stage is checked by the real tokenizer before it ships. No net token win → auto-revert. Upstream rejects it → replay the original verbatim. Worst case is *no savings* - never a bigger bill, never a broken call.
+> **The guarantee neither has:** every stage is checked by the real tokenizer before it ships. No net token win → auto-revert. Upstream rejects it → replay the original verbatim. Worst case is no savings: never a bigger bill, never a broken call.
 
 ## ⚡ Install
 
@@ -98,11 +98,16 @@ cargo install --git https://github.com/fkiene/llmtrim
 brew install fkiene/tap/llmtrim
 ```
 
-**Windows:** native - run [`install.ps1`](install.ps1), or `cargo install --git https://github.com/fkiene/llmtrim && llmtrim setup`. **WSL** is the simplest path. Full options (PATH, pinned versions, build-from-source) in [INSTALL.md](INSTALL.md).
+```powershell
+# Windows (PowerShell) - prebuilt, installs and runs setup
+irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
+```
+
+Prebuilt for x64 and ARM64. WSL: run the Linux line above. Full options (PATH, pinned versions, build-from-source) in [INSTALL.md](INSTALL.md).
 
 ## 🔧 Run it and forget it
 
-A man-in-the-middle HTTPS proxy - like mitmproxy, but compressing. No IDE settings touched; one command wires it:
+A man-in-the-middle HTTPS proxy, like mitmproxy but compressing. No IDE settings touched; one command wires it:
 
 ```bash
 llmtrim setup     # local CA + HTTPS_PROXY/NODE_EXTRA_CA_CERTS in your shell profile + autostart + start
@@ -117,7 +122,7 @@ llmtrim setup     # local CA + HTTPS_PROXY/NODE_EXTRA_CA_CERTS in your shell pro
         full bill                                          −46% bill, answer unchanged
 ```
 
-Open a new shell - your tools route through it. Then:
+Open a new shell and your tools route through it. Then:
 
 ```bash
 llmtrim monitor       # savings dashboard: ● running · $ saved · −% round-trip · by-model
@@ -125,7 +130,7 @@ llmtrim monitor --watch   # live, refreshing - watch the bill shrink in real tim
 llmtrim uninstall     # one command back out - reverses everything, transparently
 ```
 
-`uninstall` is the exact inverse of `setup` - stops the daemon, strips the shell-profile block, removes CA + binary, printing each step. No API key (it forwards your tool's own auth); safe by construction - local name-constrained CA, only a metadata-only counts ledger on disk ([Security →](#-security)).
+`uninstall` is the exact inverse of `setup`: it stops the daemon, strips the shell-profile block, and removes the CA and binary, printing each step. There's no API key to manage (it forwards your tool's own auth). Safe by construction: a local name-constrained CA, with only a metadata-only counts ledger on disk ([Security →](#-security)).
 
 <details>
 <summary><strong>More proxy commands</strong></summary>
@@ -140,17 +145,17 @@ llmtrim ca               # print the CA path + how to trust it system-wide (for 
 llmtrim monitor --daily  # time-series report (--weekly/--monthly); --json/--csv to export
 ```
 
-`monitor` is the one savings view - snapshot, `--watch`, `--daily/--weekly/--monthly`, `--json/--csv` export (`status`/`gain` are aliases).
+`monitor` is the one savings view: snapshot, `--watch`, `--daily/--weekly/--monthly`, and `--json/--csv` export (`status`/`gain` are aliases).
 
-**Any tool** honoring `HTTPS_PROXY` + an env CA works (every CLI agent, Node/VS Code). The host list comes from the [`llm_providers`](https://crates.io/crates/llm_providers) registry - OpenAI, Anthropic, Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen, MiniMax, Cerebras, OpenRouter, … - and updates with the crate. Pinned-cert tools (e.g. Copilot) can't be intercepted.
+Any tool honoring `HTTPS_PROXY` + an env CA works (every CLI agent, Node/VS Code). The host list comes from the [`llm_providers`](https://crates.io/crates/llm_providers) registry - OpenAI, Anthropic, Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen, MiniMax, Cerebras, OpenRouter, … - and updates with the crate. Pinned-cert tools (e.g. Copilot) can't be intercepted.
 
-**Default `auto`** [routes each request to its shape's preset](#-what-it-does-to-your-prompt) - safe on live traffic via breakers:
+Default `auto` [routes each request to its shape's preset](#-what-it-does-to-your-prompt), safe on live traffic via breakers:
 
 - `cache` skips a client managing its own `cache_control` (no 400s)
 - `retrieve` protects directive blocks
 - `tool_select` never drops an already-invoked tool
 
-On agent traffic, `agent`'s **tool-description trimming** is the big lever - clients resend long tool schemas every call.
+On agent traffic, `agent`'s tool-description trimming is the big lever, since clients resend long tool schemas every call.
 
 </details>
 
@@ -160,16 +165,16 @@ Eight stages, ordered by the savings hierarchy `retrieve > cache > output > seri
 
 | Stage | Lever | What it does | When it runs |
 |---|---|---|---|
-| **A** cache discipline | cache | cache the invariant prefix (`cache_control`) so it's billed once | **auto · tools** |
-| **B** lexical retrieval | retrieve | BM25 / TextRank keep only the query-relevant chunks; question protected | **auto · long context** |
-| **C** skeletonization | skeleton | tree-sitter drops function bodies, keeps signatures - 14 languages | **auto · code** |
-| **D** serialize + hygiene | serialization | minify JSON, encode record arrays to [TOON](https://crates.io/crates/toon-format)/CSV, Unicode-normalize | **always** · lossless |
-| **E** dedup | dedup | collapse duplicate + near-duplicate lines (prose only; data untouched) | **always** · exact |
-| **F** output control | output | terse instruction · Chain-of-Draft · token budget · native JSON schema | **auto** |
-| **G** tool layer | tool | static tool selection + description trimming (schemas resent each call) | **auto · tools** |
-| **H** multimodal | multimodal | downscale images to the provider's resolution cap | **auto · images** |
+| **A** cache discipline | cache | cache the invariant prefix (`cache_control`) so it's billed once | auto · tools |
+| **B** lexical retrieval | retrieve | BM25 / TextRank keep only the query-relevant chunks; question protected | auto · long context |
+| **C** skeletonization | skeleton | tree-sitter drops function bodies, keeps signatures - 14 languages | auto · code |
+| **D** serialize + hygiene | serialization | minify JSON, encode record arrays to [TOON](https://crates.io/crates/toon-format)/CSV, Unicode-normalize | always · lossless |
+| **E** dedup | dedup | collapse duplicate + near-duplicate lines (prose only; data untouched) | always · exact |
+| **F** output control | output | terse instruction · Chain-of-Draft · token budget · native JSON schema | auto |
+| **G** tool layer | tool | static tool selection + description trimming (schemas resent each call) | auto · tools |
+| **H** multimodal | multimodal | downscale images to the provider's resolution cap | auto · images |
 
-*Default `auto` switches each stage on only where it pays (the **When it runs** column). `safe` runs the lossless stages only - byte-faithful round-trip. [Full config →](#-configuration)*
+*Default `auto` switches each stage on only where it pays (the "When it runs" column). `safe` runs the lossless stages only. [Full config →](#-configuration)*
 
 ## 🛠️ One-shot & library
 
@@ -198,9 +203,9 @@ Two axes, both measured live:
 - **tokens saved**: real tokenizer, at compress time
 - **quality retained**: A/B delta between the answer on the *original* vs *compressed* request
 
-A preset is honest only if quality holds at its saving - the (saved, retained) frontier is the benchmark, not the saving alone. Full per-corpus frontier + CIs in **[bench/README.md](bench/README.md)**; it shows where compression pays (output-heavy generation/chat/reasoning) vs where it can't (cache, short extractive RAG).
+A preset is honest only if quality holds at its saving: the (saved, retained) frontier is the benchmark, not the saving alone. Full per-corpus frontier + CIs in [bench/README.md](bench/README.md). It shows where compression pays (output-heavy generation/chat/reasoning) and where it can't (cache, short extractive RAG).
 
-Scored on ground truth where possible - numeric-exact (math), **pass@1 running the unit tests** (code) - plus token-F1 (QA), tool-call match (agents), LLM judge (open-ended).
+Scored on ground truth where possible - numeric-exact (math), pass@1 running the unit tests (code) - plus token-F1 (QA), tool-call match (agents), LLM judge (open-ended).
 
 ```bash
 python3 bench/scripts/download.py 40   # pull + hash real corpora (gsm8k, humaneval, dolly, hotpotqa, glaive, ultrachat, cnn)
@@ -217,9 +222,9 @@ python3 bench/scripts/chart.py         # regenerate the chart + table
 | **`auto`** *(default)* | shape-routes each request to the proven profile - right for almost everyone |
 | **`safe`** | lossless only - byte-faithful round-trip (lossy stages off) |
 
-**Known workload?** Name a profile: `reasoning` (math / step-by-step) · `cache` (a fixed prefix reused across calls).
+Known workload? Name a profile: `reasoning` (math / step-by-step) · `cache` (a fixed prefix reused across calls).
 
-Under the hood `auto` routes by shape - tools → `agent`, code → `code`, long-context + question → `rag`, else → `aggressive`. Naming one yourself rarely helps; **`aggressive` just forces every lever onto every request**: same as `auto` on prose, riskier on tools/code/RAG. Power users can still hand-tune raw flags (`preset` wins over flags).
+Under the hood `auto` routes by shape: tools → `agent`, code → `code`, long-context + question → `rag`, else → `aggressive`. Naming one yourself rarely helps; `aggressive` just forces every lever onto every request, same as `auto` on prose but riskier on tools/code/RAG. Power users can still hand-tune raw flags (`preset` wins over flags).
 
 <details>
 <summary><strong>Advanced - per-flag overrides (alternative to a preset)</strong></summary>
@@ -232,7 +237,7 @@ Under the hood `auto` routes by shape - tools → `agent`, code → `code`, long
 | `serialize_nested` | `true` | also encode arrays nested in content JSON |
 | `serialize_min_rows` | `2` | min array rows before encoding |
 | `serialize_csv` | `false` | encode flat arrays as both TOON and CSV, keep the smaller |
-| `strip_base64` | `false` → **on in `auto`** | elide base64/data-URI blobs (≥200 chars) to a `[elided]` marker; lossy but **measured +0.0pp** (`bench/data/base64.jsonl`) |
+| `strip_base64` | `false` → on in `auto` | elide base64/data-URI blobs (≥200 chars) to a `[elided]` marker; lossy but measured +0.0pp (`bench/data/base64.jsonl`) |
 | `numeric_sig_figs` | _(none)_ | round floats to N significant figures (lossy) |
 | `output_control` | `false` | Stage F terse instruction + cap |
 | `output_level` | `"terse"` | `terse` (clean) or `draft` (Chain-of-Draft) |
@@ -260,7 +265,7 @@ Env: `LLMTRIM_PRESET` (preset by name), `LLMTRIM_CONFIG` (config-file path), `LL
 
 llmtrim sits between your tool and the provider - its trust model *is* the product. Full threat model in **[SECURITY.md](SECURITY.md)**:
 
-- **Local CA, name-constrained.** Generated on your machine (`~/.llmtrim/ca.pem`, key `0600`), X.509-constrained to LLM API domains - **can't mint a cert for any other host**, even if the key were stolen. Trusted per-tool via `NODE_EXTRA_CA_CERTS`; every non-LLM connection blind-tunnels untouched.
+- **Local CA, name-constrained.** Generated on your machine (`~/.llmtrim/ca.pem`, key `0600`), X.509-constrained to LLM API domains, so it can't mint a cert for any other host even if the key were stolen. Trusted per-tool via `NODE_EXTRA_CA_CERTS`; every non-LLM connection blind-tunnels untouched.
 - **No keys, no prompts on disk.** Forwards your tool's own auth; prompt/response text stays in memory - never logged, never persisted.
 - **Binds `127.0.0.1` only**: no client auth; never expose it on a public interface.
 - **Metadata-only ledger** (`~/.local/share/llmtrim/tracking.db`) - provider, model, token *counts*, never content. Cap 100k events; `retention_days = N` to age-prune; `uninstall --purge` wipes it.
@@ -269,11 +274,11 @@ Report vulnerabilities **privately** via a [security advisory](https://github.co
 
 ## ⚠️ Known limits
 
-Honesty is the product - the same A/B that proves the savings surfaces these:
+Honesty is the product: the same A/B that proves the savings surfaces these:
 
 - **Anthropic / Gemini counts are approximate**: no public exact tokenizer, so an o200k BPE proxy is used and flagged (`is_exact() == false`, surfaced in `gain`). OpenAI is exact (tiktoken).
 - **Output savings aren't measured live**: the proxy compresses input; an output *saving* needs the A/B counterfactual, which only offline `bench` has. `status` "saved" is input-side.
-- **Default is quality-gated, not lossless**: lossy stages run where the [eval](bench/README.md) shows quality holds; the token gate ensures fewer tokens, not quality. Want a byte-faithful round-trip? Use **`safe`**.
+- **Default is quality-gated, not lossless**: lossy stages run where the [eval](bench/README.md) shows quality holds; the token gate ensures fewer tokens, not quality. Want a byte-faithful round-trip? Use `safe`.
 - **`rusqlite` pinned at 0.39**: 0.40+ pulls `libsqlite3-sys` 0.38, whose build script needs the still-unstable `cfg_select` ([rust#115585](https://github.com/rust-lang/rust/issues/115585)) and won't build on stable.
 
 ## 🙏 Acknowledgments
@@ -312,4 +317,4 @@ Built on the Rust ecosystem: [`tiktoken-rs`](https://crates.io/crates/tiktoken-r
 
 ## 📄 License
 
-[**AGPL-3.0-only**](LICENSE) - use, modify, and self-host freely; run a **modified** version as a network service and the AGPL requires you to release your source under the same license. Contributions via [DCO](CONTRIBUTING.md#sign-your-commits-dco) sign-off.
+[**AGPL-3.0-only**](LICENSE): use, modify, and self-host freely. Run a modified version as a network service and the AGPL requires you to release your source under the same license. Contributions via [DCO](CONTRIBUTING.md#sign-your-commits-dco) sign-off.

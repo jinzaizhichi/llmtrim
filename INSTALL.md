@@ -19,6 +19,24 @@ If `~/.local/bin` isn't on your `PATH`:
 export PATH="$HOME/.local/bin:$PATH"   # add to ~/.bashrc or ~/.zshrc
 ```
 
+## Quick install (Windows)
+
+```powershell
+irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
+```
+
+Downloads the latest release binary into `%LOCALAPPDATA%\llmtrim\bin` and adds it to your
+user `PATH`. Override with:
+
+```powershell
+$env:LLMTRIM_VERSION = "v0.1.0"    # pin a release
+$env:LLMTRIM_NO_SETUP = "1"        # install the binary only, skip `setup`
+irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
+```
+
+Open a new PowerShell window afterward so the `PATH` and profile env apply. Prebuilt binaries
+ship for both x64 and ARM64. WSL users: use the Linux line above.
+
 ## Homebrew (macOS / Linux)
 
 ```bash
