@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="llmtrim" width="140">
+  <img src="https://raw.githubusercontent.com/fkiene/llmtrim/main/logo.svg" alt="llmtrim" width="140">
 </p>
 
 <h1 align="center">llmtrim</h1>
@@ -34,8 +34,8 @@ A drop-in HTTPS proxy that compresses every LLM request and reply. **Any provide
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="bench/frontier-light.svg">
-    <img src="bench/frontier-dark.svg" alt="llmtrim cuts the LLM round-trip bill both ends: original $0.0167 vs llmtrim $0.0090, −46% cost (output −73%, input −24%) across 87 live A/B cases" width="840">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/fkiene/llmtrim/main/bench/frontier-light.svg">
+    <img src="https://raw.githubusercontent.com/fkiene/llmtrim/main/bench/frontier-dark.svg" alt="llmtrim cuts the LLM round-trip bill both ends: original $0.0167 vs llmtrim $0.0090, −46% cost (output −73%, input −24%) across 87 live A/B cases" width="840">
   </picture>
 </p>
 
