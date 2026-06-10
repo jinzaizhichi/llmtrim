@@ -57,6 +57,24 @@ pub trait Transform {
         Scope::Both
     }
 
+    /// Whether this stage's output is subject to the **quality gate** (in addition to
+    /// the token gate): after the token gate accepts a lossy *content* stage, the
+    /// pipeline re-checks that query-relevant source content survived
+    /// ([`crate::quality_gate::coverage`] ≥ [`crate::quality_gate::COVERAGE_THRESHOLD`])
+    /// and reverts if it didn't — the token gate alone can't tell a cut saved tokens by
+    /// deleting the answer.
+    ///
+    /// Default `false` (opt-in) keeps the trait source-compatible: a stage that doesn't
+    /// override this is never quality-gated, so other modules' transforms compile and
+    /// behave unchanged. The two lossy content-dropping stages this protects today
+    /// (retrieve, toolout) are recognized by the pipeline by name (their modules are out
+    /// of this change's scope), but any future stage may opt in by overriding this — the
+    /// pipeline OR's the two. Only consulted for [`GateKind::InputTokens`] stages whose
+    /// [`Scope`] includes content.
+    fn quality_gated(&self) -> bool {
+        false
+    }
+
     /// Apply the transform in place. `provider` gives the stage structural access
     /// (content segments, output-control fields). A stage may push rehydration
     /// entries onto `plan`. On `Err`, the pipeline restores the pre-transform

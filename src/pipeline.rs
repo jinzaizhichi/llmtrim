@@ -9,7 +9,19 @@ use std::collections::HashMap;
 use crate::gate::{GateKind, PlanEntry, Scope, Transform};
 use crate::ir::Request;
 use crate::provider::Provider;
+use crate::quality_gate::{self, COVERAGE_THRESHOLD};
 use crate::tokenizer::{TokenCounter, Tokens};
+
+/// Stage names that drop/window query-relevant *content* and are therefore subject to
+/// the quality gate as well as the token gate. The token gate can't tell these apart
+/// from a beneficial cut — both reduce tokens — so coverage decides if the cut hurt.
+///
+/// Kept here (not on the stage types) because adding `Transform::quality_gated`
+/// overrides to the stage modules is out of this change's scope; a stage may still
+/// opt in by overriding [`Transform::quality_gated`] (OR'd with this list).
+fn quality_gated_by_name(name: &str) -> bool {
+    matches!(name, "retrieve" | "toolout")
+}
 
 /// What one stage did, for reporting and the savings ledger.
 #[derive(Debug, Clone)]
@@ -79,16 +91,43 @@ pub fn content_tokens(req: &Request, provider: &dyn Provider, counter: &dyn Toke
     count_content(req, provider, counter) + count_tools(req, counter)
 }
 
-/// Run `stages` over `req`, gating each one. The request is mutated in place to
-/// its final compressed form.
+/// Run `stages` over `req`, gating each one (token gate + quality gate on). The
+/// request is mutated in place to its final compressed form.
+///
+/// The quality gate is **on** here — the safe default for the product promise: it only
+/// ever *reverts* an over-aggressive compression, never breaks output, so leaving it on
+/// can only protect the response. Use [`run_gated`] to disable it (the `quality_gate`
+/// config knob routes through there).
 pub fn run(
     req: &mut Request,
     provider: &dyn Provider,
     counter: &dyn TokenCounter,
     stages: &[Box<dyn Transform>],
 ) -> PipelineOutcome {
+    run_gated(req, provider, counter, stages, true)
+}
+
+/// Like [`run`], but with the quality gate explicitly toggled. `quality_gate = false`
+/// runs the token gate only (the pre-quality-gate behavior). Separate entry point so
+/// [`run`]'s signature stays source-compatible for the many existing call sites.
+pub fn run_gated(
+    req: &mut Request,
+    provider: &dyn Provider,
+    counter: &dyn TokenCounter,
+    stages: &[Box<dyn Transform>],
+    quality_gate: bool,
+) -> PipelineOutcome {
     let mut plan: Vec<PlanEntry> = Vec::new();
     let mut reports = Vec::with_capacity(stages.len());
+    // Query terms for the quality gate (the question the compression must keep
+    // answerable). Computed once from the incoming request — the live question is stable
+    // across the content stages, and a stage that edits a short query segment is
+    // structurally prevented from pruning it. Skipped entirely when the gate is off.
+    let query = if quality_gate {
+        quality_gate::query_terms(req, provider)
+    } else {
+        Vec::new()
+    };
     // Opt-in per-stage wall-clock attribution (apply + re-count), to stderr. Set
     // `LLMTRIM_PROFILE=1` when benchmarking; zero cost otherwise (one env read per run).
     let profile = std::env::var_os("LLMTRIM_PROFILE").is_some();
@@ -144,6 +183,36 @@ pub fn run(
                     *req = snapshot;
                     plan.truncate(plan_mark);
                     (false, before, Some("no token reduction".to_string()))
+                } else if quality_gate
+                    && !query.is_empty()
+                    && stage.gate_kind() == GateKind::InputTokens
+                    && stage.scope() != Scope::Tools
+                    && (stage.quality_gated() || quality_gated_by_name(stage.name()))
+                    && {
+                        // Coverage of query-relevant source content surviving this cut. The
+                        // token gate already accepted (it saved tokens); the question now is
+                        // whether it saved them by deleting the answer. Source = pre-stage
+                        // *context*, compressed = post-stage *context* (the question itself is
+                        // excluded — it is pinned and always survives, so it must not satisfy
+                        // its own coverage). Only computed for the handful of lossy content
+                        // stages, and only when there is a distinct question to protect
+                        // (`!query.is_empty()` — a monolithic prompt or a log dump has none,
+                        // and blanket coverage would wrongly revert the pruning such a stage
+                        // exists to do).
+                        let source = quality_gate::context_text(&snapshot, provider);
+                        let compressed = quality_gate::context_text(req, provider);
+                        quality_gate::coverage(&source, &compressed, &query) < COVERAGE_THRESHOLD
+                    }
+                {
+                    // The cut saved tokens but dropped too much query-relevant content:
+                    // revert exactly like a token-gate failure (counts unchanged).
+                    *req = snapshot;
+                    plan.truncate(plan_mark);
+                    (
+                        false,
+                        before,
+                        Some("quality-gate reverted: coverage below threshold".to_string()),
+                    )
                 } else {
                     content = new_content;
                     tools = new_tools;

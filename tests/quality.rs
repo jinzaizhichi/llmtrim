@@ -75,6 +75,12 @@ fn recall_vs_savings_sweep() {
             retrieve: true,
             retrieve_keep_ratio: ratio,
             retrieve_min_segment_chars: 120,
+            // This sweep characterizes *retrieve's own* recall-vs-savings curve (to choose
+            // a safe keep_ratio), so the quality gate is disabled here: with it on, the
+            // tightest ratio (0.2) drops the answer chunk and the gate reverts the prune —
+            // honest product behavior, but it masks the raw recall drop this diagnostic
+            // exists to expose, and flattens savings to 0% at 0.2.
+            quality_gate: false,
             ..input_only()
         };
         let results = run_recall(&cases, &cfg).unwrap();

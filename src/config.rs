@@ -171,6 +171,17 @@ pub struct DenseConfig {
     /// still passes the input-token gate, so it can't worsen a request — at worst it does
     /// nothing (cold prefix / n-gram carve-out). In-memory only (SECURITY.md).
     pub memo: bool,
+    /// Quality gate: after the token gate accepts a lossy *content* stage (retrieve,
+    /// toolout), re-check that query-relevant source content survived
+    /// (Grusky coverage ≥ `quality_gate::COVERAGE_THRESHOLD`) and revert the stage if it
+    /// didn't — catching cuts that "save tokens" by deleting the answer.
+    ///
+    /// **Default ON** and intentionally not toggled by any preset: it only ever *reverts*
+    /// an over-aggressive compression (the request reverts to its pre-stage form, which
+    /// the token gate already proved valid), never breaks or shapes output. So leaving it
+    /// on can only protect the response — the safe default for the "quality-gated, not
+    /// lossless" promise. Set `quality_gate = false` to run the token gate alone.
+    pub quality_gate: bool,
 }
 
 impl Default for DenseConfig {
@@ -225,6 +236,7 @@ impl Default for DenseConfig {
             image_detail: None,
             auto: false,
             memo: true,
+            quality_gate: true,
         }
     }
 }

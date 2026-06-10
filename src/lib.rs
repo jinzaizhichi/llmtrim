@@ -24,6 +24,7 @@ pub mod monitor;
 pub mod pipeline;
 pub mod provider;
 pub mod quality;
+pub mod quality_gate;
 pub mod select;
 pub mod serve;
 pub mod setup;
@@ -251,7 +252,13 @@ pub fn compress_with_config(
     };
 
     let stages = stages_for(kind, config);
-    let outcome = pipeline::run(&mut req, adapter.as_ref(), counter.as_ref(), &stages);
+    let outcome = pipeline::run_gated(
+        &mut req,
+        adapter.as_ref(),
+        counter.as_ref(),
+        &stages,
+        config.quality_gate,
+    );
 
     Ok(CompressResult {
         request_json: req.to_json_string()?,
