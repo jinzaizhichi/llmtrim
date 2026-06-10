@@ -30,21 +30,99 @@ fn first_free_port(start: u16, span: u16) -> Option<u16> {
         .find(|&p| TcpListener::bind((Ipv4Addr::LOCALHOST, p)).is_ok())
 }
 
+/// Outcome of resolving which port to wire: a definite port to use, or a starting point to
+/// scan from for a free one. Split out so the precedence is pure and unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum PortChoice {
+    /// Use exactly this port (caller does not scan).
+    Use(u16),
+    /// No port is pinned — scan upward from here for the first free one.
+    ScanFrom(u16),
+}
+
+/// Decide the interceptor port, in precedence order — *without* scanning, so it's pure:
+///
+/// 1. an explicit `--port` (honor the user verbatim),
+/// 2. the port a live llmtrim daemon is already serving (reuse it — never migrate a running
+///    proxy off the port its clients point at),
+/// 3. the port already wired into the environment (`HTTPS_PROXY`), so re-running converges
+///    on what existing shells expect,
+/// 4. otherwise scan from the default.
+///
+/// Steps 2–3 are why re-running `setup` is now idempotent: the old code scanned from 8787
+/// every time, and since the running daemon *held* 8787 the scan skipped to 8788 — each
+/// re-run drifted the port upward and rewrote the env/autostart to match, breaking every
+/// already-launched client. Reusing the live/recorded port stops that.
+fn choose_port(explicit: Option<u16>, running: Option<u16>, configured: Option<u16>) -> PortChoice {
+    if let Some(p) = explicit.or(running).or(configured) {
+        PortChoice::Use(p)
+    } else {
+        PortChoice::ScanFrom(DEFAULT_PORT)
+    }
+}
+
+/// Resolve the port to wire, scanning for a free one only when nothing is pinned (the
+/// first-install case). `running` is the live daemon's port, if any. Used by `setup` and the
+/// `start` command so both agree on the same port without drifting.
+pub fn resolve_port(explicit: Option<u16>, running: Option<u16>) -> Result<u16> {
+    match choose_port(explicit, running, configured_port()) {
+        PortChoice::Use(p) => Ok(p),
+        PortChoice::ScanFrom(start) => first_free_port(start, 64)
+            .with_context(|| format!("no free port in {start}..={}", start.saturating_add(64))),
+    }
+}
+
+/// Extract the port from a local proxy URL embedded anywhere in `text` — i.e. the number
+/// right after `127.0.0.1:`. Lets us read back the port we previously wired into the env
+/// (the shell-profile block on POSIX, `HKCU\Environment\HTTPS_PROXY` on Windows). Pure.
+fn parse_proxy_port(text: &str) -> Option<u16> {
+    let after = text.split("127.0.0.1:").nth(1)?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// The interceptor port currently wired into the environment, if any — read from the live env
+/// source for this platform (POSIX: the shell-profile block; Windows: `HKCU\Environment`).
+fn configured_port() -> Option<u16> {
+    #[cfg(windows)]
+    {
+        user_env_key()
+            .ok()
+            .and_then(|env| env.get_value::<String, _>("HTTPS_PROXY").ok())
+            .and_then(|v| parse_proxy_port(&v))
+    }
+    #[cfg(not(windows))]
+    {
+        profile_target()
+            .and_then(|(p, _)| std::fs::read_to_string(p).ok())
+            .and_then(|t| parse_proxy_port(&t))
+    }
+}
+
 pub fn run(requested: Option<u16>) -> Result<()> {
     let color = ui::color_stdout();
 
     // 0. Resolve the port *once*, here, before anything is wired. The port is a contract
     //    between three parties that must agree: the profile's HTTPS_PROXY (clients), the
-    //    autostart entry (`serve --port N` at login), and the daemon that binds it. Picking
-    //    it lazily in `serve` would desync the clients — so we choose a port that actually
-    //    binds now and feed that single value into all three below.
-    let start = requested.unwrap_or(DEFAULT_PORT);
-    let port = first_free_port(start, 64)
-        .with_context(|| format!("no free port in {start}..={}", start.saturating_add(64)))?;
-    if port != start {
+    //    autostart entry (`serve --port N` at login), and the daemon that binds it. We reuse
+    //    the port a live daemon already serves (or one already wired into the env) instead of
+    //    scanning blindly — otherwise the running daemon holds 8787, the scan drifts to 8788,
+    //    and every re-run rewrites the env/autostart to a new port, breaking running clients.
+    let running = crate::daemon::running();
+    let running_port = running.as_ref().map(|s| s.port);
+    let configured = configured_port();
+    let pinned = requested.or(running_port).or(configured);
+    let port = match choose_port(requested, running_port, configured) {
+        PortChoice::Use(p) => p,
+        PortChoice::ScanFrom(start) => first_free_port(start, 64)
+            .with_context(|| format!("no free port in {start}..={}", start.saturating_add(64)))?,
+    };
+    // Only chatter about the port when we had to pick one nobody asked for (first install,
+    // default busy). When we're reusing a pinned port, silence is correct.
+    if pinned.is_none() && port != DEFAULT_PORT {
         println!(
             "{}",
-            ui::note(color, &format!("Port {start} busy — using {port}."))
+            ui::note(color, &format!("Port {DEFAULT_PORT} busy — using {port}."))
         );
     }
 
@@ -115,22 +193,36 @@ pub fn run(requested: Option<u16>) -> Result<()> {
         Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not enabled: {e}"))),
     }
 
-    // 4. (Re)start the interceptor. Stop any existing daemon first so re-running `setup`
-    //    after an update actually goes live — otherwise the old process keeps serving the
-    //    old binary until a manual restart (the silent-stale-update trap).
-    let _ = crate::daemon::stop();
-    let daemon_ok = match crate::daemon::spawn_detached(port) {
-        Ok(pid) => {
+    // 4. Reconcile the interceptor. If a healthy daemon is already serving the resolved port,
+    //    leave it running — re-running `setup` must not drop in-flight requests (the old code
+    //    stopped + respawned unconditionally on every run). Restart only when the port is
+    //    changing (explicit `--port`, or self-healing a drifted state) or the daemon is gone —
+    //    that also picks up a new binary after an update (the silent-stale-update trap).
+    let daemon_ok = match &running {
+        Some(state) if state.port == port => {
             rows.push((
                 ui::OK,
                 "Interceptor".into(),
-                format!("running · pid {pid} · port {port}"),
+                format!("already running · pid {} · port {port}", state.pid),
             ));
             true
         }
-        Err(e) => {
-            rows.push((ui::WARN, "Interceptor".into(), format!("not started: {e}")));
-            false
+        _ => {
+            let _ = crate::daemon::stop(); // clear a dead/old-port daemon + its pidfile first
+            match crate::daemon::spawn_detached(port) {
+                Ok(pid) => {
+                    rows.push((
+                        ui::OK,
+                        "Interceptor".into(),
+                        format!("running · pid {pid} · port {port}"),
+                    ));
+                    true
+                }
+                Err(e) => {
+                    rows.push((ui::WARN, "Interceptor".into(), format!("not started: {e}")));
+                    false
+                }
+            }
         }
     };
 
@@ -331,7 +423,38 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
                 format!("removed {}", exe.display()),
             ));
         }
-        #[cfg(not(unix))]
+        // Windows can't unlink a running .exe. But we CAN stop `llmtrim` resolving as a
+        // command — drop the installer's bin dir from the user PATH — and schedule the
+        // install dir's removal after we exit. Only for installer builds (exe under
+        // %LOCALAPPDATA%\llmtrim); a cargo/dev binary elsewhere is left untouched.
+        #[cfg(windows)]
+        {
+            match remove_bin_dir_from_path() {
+                Ok(true) => rows.push((
+                    ui::OK,
+                    "PATH".into(),
+                    "removed the llmtrim bin dir from your user PATH".into(),
+                )),
+                Ok(false) => {}
+                Err(e) => rows.push((ui::WARN, "PATH".into(), format!("not cleaned: {e}"))),
+            }
+            if let Some(dir) = installer_dir_of(&exe) {
+                schedule_dir_removal(&dir);
+                rows.push((
+                    ui::OK,
+                    "Binary".into(),
+                    format!("scheduled removal of {} after exit", dir.display()),
+                ));
+            } else {
+                rows.push((
+                    ui::NOTE,
+                    "Binary".into(),
+                    format!("remove manually: {}", exe.display()),
+                ));
+            }
+            broadcast_env_change(); // re-broadcast so the dropped PATH entry takes effect
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             rows.push((
                 ui::NOTE,
@@ -496,6 +619,102 @@ fn has_proxy_in(env: &winreg::RegKey) -> bool {
         .is_ok_and(|v| v.contains("127.0.0.1"))
 }
 
+// ── Windows binary + PATH cleanup (the installer's footprint) ────────────────────
+// install.ps1 drops llmtrim.exe in %LOCALAPPDATA%\llmtrim\bin and adds that dir to the user
+// PATH. Uninstall has to reverse both, or `llmtrim` keeps resolving as a command afterwards.
+
+/// The installer's bin dir, `%LOCALAPPDATA%\llmtrim\bin` (the entry it adds to the user PATH).
+#[cfg(windows)]
+fn installer_bin_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("llmtrim").join("bin"))
+}
+
+/// `%LOCALAPPDATA%\llmtrim` when `exe` lives under it — i.e. this is an installer build, safe
+/// to schedule for deletion. A cargo/dev binary elsewhere returns `None` (never self-deleted).
+#[cfg(windows)]
+fn installer_dir_of(exe: &std::path::Path) -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("llmtrim");
+    exe.starts_with(&root).then_some(root)
+}
+
+/// UTF-16LE bytes with a trailing NUL — the on-disk form of a `REG_SZ`/`REG_EXPAND_SZ` value,
+/// so we can write PATH back in whatever string type it already used.
+#[cfg(windows)]
+fn encode_utf16_nul(s: &str) -> Vec<u8> {
+    s.encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+/// Drop the installer's bin dir from the user PATH (`HKCU\Environment\Path`). Returns true if
+/// it was present and removed. Preserves the value's registry type (`REG_EXPAND_SZ` stays
+/// expandable — rewriting it as plain `REG_SZ` would break any `%VAR%` still in the PATH).
+#[cfg(windows)]
+fn remove_bin_dir_from_path() -> Result<bool> {
+    use winreg::enums::RegType;
+    use winreg::types::FromRegValue;
+    let Some(bin) = installer_bin_dir() else {
+        return Ok(false);
+    };
+    let env = user_env_key()?;
+    let Ok(raw) = env.get_raw_value("Path") else {
+        return Ok(false); // no user PATH set → nothing of ours to remove
+    };
+    if raw.vtype != RegType::REG_SZ && raw.vtype != RegType::REG_EXPAND_SZ {
+        return Ok(false); // leave an unexpected type untouched
+    }
+    let current = String::from_reg_value(&raw).unwrap_or_default();
+    let stripped = strip_path_entry(&current, &bin.to_string_lossy());
+    if stripped == current {
+        return Ok(false);
+    }
+    let new_raw = winreg::RegValue {
+        bytes: encode_utf16_nul(&stripped),
+        vtype: raw.vtype,
+    };
+    env.set_raw_value("Path", &new_raw)
+        .context("failed to update the user PATH")?;
+    Ok(true)
+}
+
+/// Schedule deletion of the install dir once we've exited. A running `.exe` can't be unlinked
+/// on Windows, so spawn a detached `cmd` that waits (~2 s via `ping`, the reliable console-less
+/// delay) then `rmdir`s the tree. Best-effort: uninstall never fails on this.
+#[cfg(windows)]
+fn schedule_dir_removal(dir: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!(
+        "ping 127.0.0.1 -n 3 >nul & rmdir /s /q \"{}\"",
+        dir.display()
+    );
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", &script])
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// Remove every occurrence of `dir` from a `;`-separated PATH string, preserving the other
+/// entries and their order. Ignores case and a trailing slash (Windows path semantics). Pure,
+/// so it's unit-tested on every platform even though it's only called on Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn strip_path_entry(path: &str, dir: &str) -> String {
+    let norm = |s: &str| s.trim().trim_end_matches(['\\', '/']).to_ascii_lowercase();
+    let target = norm(dir);
+    // Drop only the matching segment(s); other entries (and any pre-existing empties) keep
+    // their original text and order — we touch the PATH as little as possible.
+    path.split(';')
+        .filter(|seg| norm(seg) != target)
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 /// Which shell dialect the profile uses, so the managed block is written in its native syntax.
 /// Each variant is constructed on only one platform (`Posix` off-Windows, `PowerShell` on
 /// Windows), yet both arms of `env_block` are compiled and unit-tested everywhere so the
@@ -616,6 +835,55 @@ fn strip_block(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choose_port_precedence() {
+        // Explicit `--port` always wins, even over a running daemon and a configured env.
+        assert_eq!(
+            choose_port(Some(9000), Some(8800), Some(8700)),
+            PortChoice::Use(9000)
+        );
+        // No explicit → reuse the running daemon's port (don't migrate a live proxy).
+        assert_eq!(
+            choose_port(None, Some(8800), Some(8700)),
+            PortChoice::Use(8800)
+        );
+        // No daemon → reuse what the env already points at, so re-running converges.
+        assert_eq!(choose_port(None, None, Some(8700)), PortChoice::Use(8700));
+        // Nothing pinned → scan from the default (the only case that probes for a free port).
+        assert_eq!(
+            choose_port(None, None, None),
+            PortChoice::ScanFrom(DEFAULT_PORT)
+        );
+    }
+
+    #[test]
+    fn parse_proxy_port_reads_the_wired_port() {
+        assert_eq!(parse_proxy_port("http://127.0.0.1:8787"), Some(8787));
+        // Embedded in a real profile/registry line, with trailing content after the digits.
+        assert_eq!(
+            parse_proxy_port("export HTTPS_PROXY=\"http://127.0.0.1:9001\"\nexport X=1\n"),
+            Some(9001)
+        );
+        assert_eq!(parse_proxy_port("no proxy here"), None);
+        assert_eq!(parse_proxy_port("127.0.0.1:"), None); // present but portless
+    }
+
+    #[test]
+    fn strip_path_entry_removes_only_the_target() {
+        let path = r"C:\Windows;C:\Users\u\AppData\Local\llmtrim\bin;C:\tools";
+        let dir = r"C:\Users\u\AppData\Local\llmtrim\bin";
+        assert_eq!(strip_path_entry(path, dir), r"C:\Windows;C:\tools");
+
+        // Case- and trailing-slash-insensitive (Windows path semantics), order preserved.
+        let messy = r"C:\a;c:\users\u\appdata\local\LLMTRIM\BIN\;C:\b";
+        assert_eq!(strip_path_entry(messy, dir), r"C:\a;C:\b");
+
+        // Absent → unchanged. Other entries (incl. pre-existing empties) are left as-is.
+        assert_eq!(strip_path_entry(r"C:\a;C:\b", dir), r"C:\a;C:\b");
+        // A leading-semicolon PATH (installer appended to an empty user PATH) collapses cleanly.
+        assert_eq!(strip_path_entry(&format!(";{dir}"), dir), "");
+    }
 
     #[test]
     fn strip_block_removes_managed_section_only() {

@@ -87,11 +87,13 @@ enum Commands {
         #[arg(long, hide = true)]
         supervised: bool,
     },
-    /// Set everything up and start saving (CA, shell profile, autostart, daemon)
+    /// Set everything up and start saving (CA, environment, autostart, daemon)
     ///
-    /// The fastest path from install to compressing: ensures the local CA, writes
-    /// HTTPS_PROXY + CA trust to your shell profile, enables run-at-login, and
-    /// starts the interceptor. No IDE settings are touched, no sudo.
+    /// The fastest path from install to compressing: ensures the local CA, sets
+    /// HTTPS_PROXY + CA trust in your environment (shell profile on POSIX,
+    /// HKCU\Environment on Windows), enables run-at-login, and starts the
+    /// interceptor. Idempotent — re-running reuses the same port and won't restart a
+    /// healthy daemon. No IDE settings are touched, no sudo.
     Setup {
         /// Interceptor port. Omit to auto-select a free port starting at 8787.
         #[arg(long)]
@@ -99,8 +101,8 @@ enum Commands {
     },
     /// Undo everything `setup` did
     ///
-    /// Stops the daemon, disables autostart, strips the shell-profile env block,
-    /// and removes the CA + state (and the binary). Every step is printed.
+    /// Stops the daemon, disables autostart, removes the interceptor env, and
+    /// removes the CA + state (and the binary). Every step is printed.
     Uninstall {
         /// Also delete the savings ledger (kept by default).
         #[arg(long)]
@@ -108,6 +110,16 @@ enum Commands {
         /// Leave the binary in place (default removes it on Unix).
         #[arg(long)]
         keep_binary: bool,
+    },
+    /// Start the background interceptor daemon (no-op if already running)
+    ///
+    /// The lightweight partner to `stop`: starts the daemon without re-running the full
+    /// `setup`. Reuses the port already wired into your environment (or `--port`), so it
+    /// matches what your tools point at. Run `setup` first if you haven't.
+    Start {
+        /// Port to listen on. Omit to reuse the configured port (or 8787).
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Stop the background interceptor daemon
     Stop,
@@ -347,6 +359,52 @@ fn run() -> Result<()> {
         Commands::Uninstall { purge, keep_binary } => {
             llmtrim::setup::uninstall(purge, keep_binary)?
         }
+        Commands::Start { port } => {
+            let color = ui::color_stdout();
+            if let Some(state) = llmtrim::daemon::running() {
+                println!(
+                    "{}",
+                    ui::ok(
+                        color,
+                        &format!(
+                            "Interceptor already running · pid {} · port {}",
+                            state.pid, state.port
+                        )
+                    )
+                );
+            } else {
+                // No live daemon → resolve the port the same way `setup` does (explicit, else
+                // the one already wired into the env, else 8787) so we match existing clients.
+                let port = llmtrim::setup::resolve_port(port, None)?;
+                let pid = llmtrim::daemon::spawn_detached(port)?;
+                println!(
+                    "{}",
+                    ui::ok(
+                        color,
+                        &format!("Interceptor running · pid {pid} · port {port}")
+                    )
+                );
+                for (label, value) in [
+                    ("watch", "llmtrim status".to_string()),
+                    ("stop", "llmtrim stop".to_string()),
+                ] {
+                    println!(
+                        "    {}  {value}",
+                        ui::paint(color, Tone::Dim, &format!("{label:<5}"))
+                    );
+                }
+                if !llmtrim::setup::profile_has_block() {
+                    eprintln!(
+                        "{}",
+                        ui::note(
+                            ui::color_stderr(),
+                            "HTTPS_PROXY isn't set for your user yet — run `llmtrim setup` so \
+                             tools actually route through the interceptor."
+                        )
+                    );
+                }
+            }
+        }
         Commands::Stop => match llmtrim::daemon::stop()? {
             Some(pid) => {
                 println!(
@@ -363,7 +421,7 @@ fn run() -> Result<()> {
                             ui::color_stderr(),
                             "HTTPS_PROXY still points at llmtrim in your environment — \
                              new HTTPS to LLM hosts will fail until you start it again \
-                             (llmtrim serve --daemon) or run llmtrim uninstall."
+                             (llmtrim start) or run llmtrim uninstall."
                         )
                     );
                 }
@@ -1048,12 +1106,11 @@ fn run_monitor(
     }
 }
 
-/// `(input savings, total spend, output spend)` in USD, priced per model via the
-/// `llm_providers` registry. Savings = input tokens we cut × input price; total spend = the
-/// actual input_after + measured output, at registry rates; output spend is the output slice
+/// `(input savings, total spend, output spend)` in USD, priced per model via
+/// [`llm_prices`]. Savings = input tokens we cut × input price; total spend = the
+/// actual input_after + measured output, at those rates; output spend is the output slice
 /// of it, so the dashboard can project the output-side saving. `None` when no recorded model
-/// matches the registry (or this build has no interceptor feature).
-#[cfg(feature = "intercept")]
+/// is priced.
 fn cost_estimate(models: &[llmtrim::tracking::ModelRow]) -> Option<(f64, f64, f64)> {
     let mut saved = 0.0;
     let mut spend = 0.0;
@@ -1074,24 +1131,32 @@ fn cost_estimate(models: &[llmtrim::tracking::ModelRow]) -> Option<(f64, f64, f6
     matched.then_some((saved, spend, out_spend))
 }
 
-/// Per-1M-token `(input, output)` price for a model, matched across every provider in the
-/// registry (the ledger records the wire-shape provider, not the upstream brand).
-#[cfg(feature = "intercept")]
+/// Per-1M-token `(input, output)` price for a model: the `llm_providers` registry first,
+/// matched across every provider (the ledger records the wire-shape provider, not the
+/// upstream brand), then the embedded models.dev snapshot for models the registry hasn't
+/// shipped yet (e.g. day-one releases like claude-fable-5 on 0.14.3).
 fn llm_prices(model_id: &str) -> Option<(f64, f64)> {
+    #[cfg(feature = "intercept")]
     for &provider_id in llm_providers::get_providers_data().keys() {
         if let Some(model) = llm_providers::get_model_ref(provider_id, model_id) {
             return Some((model.input_price, model.output_price));
         }
     }
-    None
+    snapshot_prices(model_id)
 }
 
-#[cfg(not(feature = "intercept"))]
-fn cost_estimate(_models: &[llmtrim::tracking::ModelRow]) -> Option<(f64, f64, f64)> {
-    None
-}
-
-#[cfg(not(feature = "intercept"))]
-fn llm_prices(_model_id: &str) -> Option<(f64, f64)> {
-    None
+/// Fallback table: the pinned models.dev snapshot the bench prices from, embedded at
+/// compile time (the package re-includes bench/pricing.json for this). Exact id first,
+/// then with the `provider/` prefix stripped, mirroring [`bench::resolve_pricing`] — but
+/// zero-priced rows (free tiers, parse gaps) return `None` so an unknown model shows a
+/// blank cost cell rather than a misleading $0.00.
+fn snapshot_prices(model_id: &str) -> Option<(f64, f64)> {
+    static TABLE: once_cell::sync::Lazy<bench::PriceTable> =
+        once_cell::sync::Lazy::new(|| bench::load_pricing(include_str!("../bench/pricing.json")));
+    let p = TABLE.get(model_id).or_else(|| {
+        let (_, bare) = model_id.split_once('/')?;
+        TABLE.get(bare)
+    })?;
+    let (input, output) = (p.input_per_1k * 1000.0, p.output_per_1k * 1000.0);
+    (input > 0.0 || output > 0.0).then_some((input, output))
 }
