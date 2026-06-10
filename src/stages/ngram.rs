@@ -11,12 +11,18 @@
 //! InputTokens-gated: reverts unless the legend pays for itself. Aborts losslessly
 //! if the placeholder marker already occurs in the content.
 //!
-//! Universality: candidates are word n-grams over whitespace-delimited tokens, so this
+//! Universality: candidates are word sequences over whitespace-delimited tokens, so this
 //! covers any space-separated script (Latin, Cyrillic, Greek, Arabic, …) and gracefully
 //! no-ops on scripts without inter-word spaces (CJK, Thai) — a word-level glossary
 //! doesn't apply there, so that content is left verbatim rather than mis-abbreviated.
-
-use std::collections::HashMap;
+//!
+//! Mining (see [`crate::stages::ngram_sa`]): the repeated phrases are the *maximal
+//! repeats* of the word sequence, enumerated from a suffix array + LCP array in
+//! O(n log n) ("Efficient Repeat Finding via Suffix Arrays", arXiv:1304.0528), then
+//! chosen greedily by their real token gain with overlap accounting — the Re-Pair idea
+//! of substituting the most profitable repeat (Larsson & Moffat; arXiv:1611.01479),
+//! priced in target tokens rather than raw frequency. This captures whole repeated
+//! spans a fixed n-gram window would fragment or miss.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -24,6 +30,7 @@ use serde_json::Value;
 use crate::gate::{GateKind, PlanEntry, Transform};
 use crate::ir::Request;
 use crate::provider::Provider;
+use crate::tokenizer::counter_for;
 
 pub struct NgramStage {
     /// Maximum dictionary entries (placeholders) to introduce.
@@ -72,22 +79,35 @@ impl Transform for NgramStage {
         }
 
         let mut working: Vec<String> = prose.iter().map(|&i| segs[i].1.clone()).collect();
+
+        // Price the dictionary in REAL target tokens: build the same counter the gate
+        // uses (provider + model), so the stage's gain estimate and the pipeline's
+        // accept/revert decision agree. Unknown/missing model falls back inside
+        // `counter_for`, so this never errors out the stage.
+        let model = req.raw().get("model").and_then(Value::as_str);
+        let counter = counter_for(req.kind(), model)?;
+
+        // Mine maximal repeats and select the positive-token-gain phrases (suffix array
+        // + LCP, greedy by gain with overlap accounting). Phrases come back in commit
+        // order — longest/most-profitable first.
+        let work_refs: Vec<&str> = working.iter().map(String::as_str).collect();
+        let selections =
+            crate::stages::ngram_sa::mine(&work_refs, self.max_entries, counter.as_ref(), |k| {
+                format!("{marker}{k}")
+            });
+        if selections.is_empty() {
+            return Ok(());
+        }
+
         let mut committed: Vec<(String, String)> = Vec::new();
-        // Longest phrases first: more savings per hit, and replacing them first
-        // consumes their sub-phrases so those drop below the frequency threshold.
-        for phrase in candidate_phrases(&working) {
-            if committed.len() >= self.max_entries {
-                break;
-            }
-            let occ: usize = working.iter().map(|t| count_word_bounded(t, &phrase)).sum();
-            if occ < 2 {
-                continue; // no longer repeats after prior replacements → wouldn't pay
-            }
+        for sel in selections {
             let ph = format!("{marker}{}", committed.len() + 1);
+            // Whole-word replace keeps the legend lossless ("the report" must not match
+            // inside "the reporter"); the mined phrases are word-aligned by construction.
             for t in working.iter_mut() {
-                *t = replace_word_bounded(t, &phrase, &ph);
+                *t = replace_word_bounded(t, &sel.phrase, &ph);
             }
-            committed.push((ph, phrase));
+            committed.push((ph, sel.phrase));
         }
         if committed.is_empty() {
             return Ok(());
@@ -105,54 +125,6 @@ impl Transform for NgramStage {
         provider.add_system_instruction(req, &GLOSSARY_TMPL.replace("{terms}", &legend));
         Ok(())
     }
-}
-
-/// The largest number of candidate phrases the recount loop will consider. The recount
-/// re-scans the whole text per candidate (O(candidates × text)), so cap the set to the
-/// few hundred with the most estimated savings (freq × phrase length) before recounting —
-/// the rest can't pay for a glossary entry anyway.
-const MAX_CANDIDATES: usize = 200;
-
-/// Repeated multi-word phrases (n = 2..=6 words, frequency ≥ 2), capped to the
-/// [`MAX_CANDIDATES`] highest-savings phrases, then sorted longest first / most frequent —
-/// the greedy commit order that maximizes savings and lets long phrases subsume their
-/// sub-grams.
-fn candidate_phrases(texts: &[String]) -> Vec<String> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for t in texts {
-        let words: Vec<&str> = t.split_whitespace().collect();
-        for n in 2..=6 {
-            if words.len() < n {
-                break;
-            }
-            for w in words.windows(n) {
-                *counts.entry(w.join(" ")).or_insert(0) += 1;
-            }
-        }
-    }
-    let mut cands: Vec<(String, usize)> = counts
-        .into_iter()
-        .filter(|(p, c)| *c >= 2 && p.chars().count() >= 8)
-        .collect();
-    // Bound the recount work: keep only the top phrases by estimated savings
-    // (occurrences × chars) — char-aware so non-Latin scripts aren't undercounted.
-    if cands.len() > MAX_CANDIDATES {
-        cands.sort_by(|a, b| {
-            let saving = |p: &str, c: usize| c.saturating_mul(p.chars().count());
-            saving(&b.0, b.1)
-                .cmp(&saving(&a.0, a.1))
-                .then(a.0.cmp(&b.0))
-        });
-        cands.truncate(MAX_CANDIDATES);
-    }
-    cands.sort_by(|a, b| {
-        let words = |s: &str| s.split_whitespace().count();
-        words(&b.0)
-            .cmp(&words(&a.0))
-            .then(b.1.cmp(&a.1))
-            .then(a.0.cmp(&b.0))
-    });
-    cands.into_iter().map(|(p, _)| p).collect()
 }
 
 /// The candidate placeholder markers, in preference order. A marker is chosen only if it
@@ -231,12 +203,18 @@ mod tests {
 
     #[test]
     fn candidates_include_the_repeated_phrase() {
+        // The miner is gain-gated (positive real-token gain only), so the phrase has to
+        // recur enough to outweigh its one legend entry — five hits clears the bar.
         let phrase = "the quarterly financial report";
-        let text = format!("{phrase} grew. later {phrase} fell. again {phrase} held.");
-        let cands = candidate_phrases(&[text]);
+        let text = format!(
+            "{phrase} grew. later {phrase} fell. again {phrase} held. then {phrase} rose. finally {phrase} dipped."
+        );
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let sel =
+            crate::stages::ngram_sa::mine(&[&text], 32, counter.as_ref(), |k| format!("§{k}"));
         assert!(
-            cands.iter().any(|p| p == phrase),
-            "frequent phrase is a candidate"
+            sel.iter().any(|s| s.phrase == phrase),
+            "frequent phrase is mined and selected"
         );
     }
 
@@ -340,5 +318,226 @@ mod tests {
             "no placeholder injected into record data"
         );
         assert_eq!(now, content, "record segment left exactly verbatim");
+    }
+
+    /// Real target-token count of one string (the measure the gate uses).
+    fn toks(counter: &dyn crate::tokenizer::TokenCounter, s: &str) -> usize {
+        counter.count(s)
+    }
+
+    /// The OLD fixed-window miner (word n-grams, n = 2..=6, frequency ≥ 2, ≥ 8 chars,
+    /// longest-first greedy) — reproduced here only to prove the suffix-array miner beats
+    /// it on a phrase longer than the fixed window.
+    fn old_fixed_window_pick(text: &str) -> Option<String> {
+        use std::collections::HashMap;
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for n in 2..=6 {
+            if words.len() < n {
+                break;
+            }
+            for w in words.windows(n) {
+                *counts.entry(w.join(" ")).or_insert(0) += 1;
+            }
+        }
+        let mut cands: Vec<(String, usize)> = counts
+            .into_iter()
+            .filter(|(p, c)| *c >= 2 && p.len() >= 8)
+            .collect();
+        cands.sort_by(|a, b| {
+            let words = |s: &str| s.split_whitespace().count();
+            words(&b.0)
+                .cmp(&words(&a.0))
+                .then(b.1.cmp(&a.1))
+                .then(a.0.cmp(&b.0))
+        });
+        cands.into_iter().map(|(p, _)| p).next()
+    }
+
+    #[test]
+    fn captures_phrase_longer_than_the_fixed_window() {
+        // A 9-word boilerplate clause, repeated. The old miner caps n at 6, so it can
+        // only ever pick a 6-word fragment; the suffix-array miner takes the whole 9-word
+        // span — fewer placeholders, one legend entry, strictly more tokens saved.
+        let clause = "the parties hereby agree to indemnify and hold harmless";
+        assert_eq!(clause.split_whitespace().count(), 9, "fixture is 9 words");
+        // Vary the word before AND after each occurrence so the maximal repeat is exactly
+        // the 9-word clause (no shared neighbor silently extends it to 10).
+        let text = format!(
+            "firstly {clause} promptly. moreover {clause} fully. \
+             additionally {clause} jointly. lastly {clause} severally."
+        );
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+
+        // New miner: the full 9-word clause is the top selection.
+        let sel =
+            crate::stages::ngram_sa::mine(&[&text], 32, counter.as_ref(), |k| format!("§{k}"));
+        let top = sel.first().expect("a phrase is selected");
+        assert_eq!(
+            top.phrase, clause,
+            "suffix-array miner captures the whole 9-word repeat, not a fragment"
+        );
+
+        // Old miner can only reach a ≤6-word fragment of the clause.
+        let old = old_fixed_window_pick(&text).expect("fixed-window picks something");
+        assert!(
+            old.split_whitespace().count() <= 6,
+            "fixed window is capped at 6 words (got {})",
+            old.split_whitespace().count()
+        );
+        assert!(
+            top.phrase.split_whitespace().count() > old.split_whitespace().count(),
+            "new phrase is longer than the fixed-window best"
+        );
+
+        // Savings comparison: apply each pick once and compare residual tokens. The new
+        // longer phrase replaces the same 4 occurrences with one placeholder + one legend
+        // entry, beating the fragment which leaves the rest of the clause uncompressed.
+        let occ = 4;
+        let new_after = occ * toks(counter.as_ref(), "§1")
+            + toks(counter.as_ref(), &format!("§1={}; ", top.phrase));
+        let new_before = occ * toks(counter.as_ref(), top.phrase.as_str());
+        let old_after =
+            occ * toks(counter.as_ref(), "§1") + toks(counter.as_ref(), &format!("§1={old}; "));
+        let old_before = occ * toks(counter.as_ref(), &old);
+        let new_saved = new_before as i64 - new_after as i64;
+        let old_saved = old_before as i64 - old_after as i64;
+        assert!(
+            new_saved > old_saved,
+            "suffix-array savings ({new_saved}) exceed fixed-window savings ({old_saved})"
+        );
+    }
+
+    #[test]
+    fn overlap_no_double_claimed_spans_and_reconstructs() {
+        // Genuinely overlapping candidates: the 4-word "alpha bravo charlie delta" recurs,
+        // and (separately) the 4-word "charlie delta echo foxtrot" recurs, sharing the
+        // "charlie delta" sub-span — but the 6-word concatenation only co-occurs sometimes,
+        // so neither phrase subsumes the other. Overlap accounting must ensure a word
+        // claimed by the first pick isn't recounted for the second, and the legend must
+        // reverse to the exact original text.
+        let left = "alpha bravo charlie delta";
+        let right = "charlie delta echo foxtrot";
+        let text = format!(
+            "{left} one. {left} two. {left} three. {left} four. \
+             {right} five. {right} six. {right} seven. {right} eight."
+        );
+        let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":text}]});
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(NgramStage { max_entries: 32 })];
+        let out = pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
+        assert!(out.stages[0].applied, "overlapping repeats still compress");
+
+        let user = req.get_str("/messages/1/content").unwrap().to_string();
+        let sys = req.get_str("/messages/0/content").unwrap().to_string();
+
+        // Parse the legend back out: `§k=phrase` pairs joined by `; `.
+        let legend = sys
+            .split_once(':')
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or(&sys);
+        let mut pairs: Vec<(String, String)> = legend
+            .split("; ")
+            .filter_map(|e| {
+                e.split_once('=')
+                    .map(|(k, v)| (k.trim().to_string(), v.to_string()))
+            })
+            .collect();
+        // Reverse-substitute longest placeholder first so §10 isn't shadowed by §1.
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(b.0.cmp(&a.0)));
+        let mut restored = user.clone();
+        for (ph, phrase) in &pairs {
+            restored = restored.replace(ph.as_str(), phrase);
+        }
+        assert_eq!(
+            restored, text,
+            "legend reverses placeholders to the exact original"
+        );
+
+        // Every placeholder defined in the legend is actually used in the body (no orphan
+        // entry from a span that was claimed away), and vice versa.
+        for (ph, _) in &pairs {
+            assert!(
+                user.contains(ph.as_str()),
+                "every legend entry is referenced"
+            );
+        }
+        // No placeholder index appears in the body without a matching legend definition.
+        for tok in user.split(|c: char| !c.is_alphanumeric() && c != '§') {
+            if let Some(rest) = tok.strip_prefix('§') {
+                if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
+                    assert!(
+                        pairs.iter().any(|(ph, _)| ph == tok),
+                        "placeholder {tok} in body must be defined in the legend"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selection_is_deterministic_across_runs() {
+        let p = "the internal configuration service endpoint";
+        let content =
+            format!("{p} failed. retry {p}. then {p} again. {p} more. {p} keeps. {p} still.");
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let run_once = || {
+            crate::stages::ngram_sa::mine(&[&content], 32, counter.as_ref(), |k| format!("§{k}"))
+                .into_iter()
+                .map(|s| s.phrase)
+                .collect::<Vec<_>>()
+        };
+        let a = run_once();
+        let b = run_once();
+        let c = run_once();
+        assert!(!a.is_empty(), "something is selected");
+        assert_eq!(a, b, "mining is deterministic");
+        assert_eq!(b, c, "mining is deterministic");
+    }
+
+    #[test]
+    fn unicode_cjk_and_accented_repeats() {
+        // CJK is space-separated here (word-segmented upstream); the accented Latin phrase
+        // carries combining marks. Both must be mined whole and round-trip losslessly.
+        let cjk = "请 立即 提交 季度 财务 报告"; // "submit the quarterly financial report now"
+        let accented = "déclaration trimestrielle of résultats financiers";
+        let text = format!(
+            "{cjk} 一. {cjk} 二. {cjk} 三. {cjk} 四. \
+             {accented} A. {accented} B. {accented} C. {accented} D."
+        );
+        let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":text}]});
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let stages: Vec<Box<dyn Transform>> = vec![Box::new(NgramStage { max_entries: 32 })];
+        let out = pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &stages);
+        assert!(out.stages[0].applied, "unicode repeats compress");
+
+        let sys = req.get_str("/messages/0/content").unwrap();
+        assert!(
+            sys.contains(cjk) || sys.contains(accented),
+            "a unicode phrase is defined in the legend verbatim"
+        );
+
+        // Round-trip: reversing the legend rebuilds the exact original (no mangled bytes
+        // mid-grapheme — the word-bounded replace only cuts on non-alphanumeric edges).
+        let user = req.get_str("/messages/1/content").unwrap().to_string();
+        let legend = sys.split_once(':').map(|(_, r)| r.trim()).unwrap_or(sys);
+        let mut pairs: Vec<(String, String)> = legend
+            .split("; ")
+            .filter_map(|e| {
+                e.split_once('=')
+                    .map(|(k, v)| (k.trim().to_string(), v.to_string()))
+            })
+            .collect();
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(b.0.cmp(&a.0)));
+        let mut restored = user.clone();
+        for (ph, phrase) in &pairs {
+            restored = restored.replace(ph.as_str(), phrase);
+        }
+        assert_eq!(
+            restored, text,
+            "unicode legend reverses to the exact original"
+        );
     }
 }

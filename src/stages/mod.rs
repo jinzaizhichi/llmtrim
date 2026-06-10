@@ -6,6 +6,7 @@ pub mod hygiene;
 pub mod image;
 pub mod jsoncrush;
 pub mod ngram;
+pub mod ngram_sa;
 pub mod output;
 pub mod retrieve;
 pub mod serialize;
