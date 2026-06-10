@@ -467,13 +467,14 @@ mod tests {
         }
         // No placeholder index appears in the body without a matching legend definition.
         for tok in user.split(|c: char| !c.is_alphanumeric() && c != '§') {
-            if let Some(rest) = tok.strip_prefix('§') {
-                if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
-                    assert!(
-                        pairs.iter().any(|(ph, _)| ph == tok),
-                        "placeholder {tok} in body must be defined in the legend"
-                    );
-                }
+            if let Some(rest) = tok.strip_prefix('§')
+                && rest.chars().all(|c| c.is_ascii_digit())
+                && !rest.is_empty()
+            {
+                assert!(
+                    pairs.iter().any(|(ph, _)| ph == tok),
+                    "placeholder {tok} in body must be defined in the legend"
+                );
             }
         }
     }
