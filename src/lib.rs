@@ -141,11 +141,13 @@ fn stages_for(_provider: ProviderKind, config: &config::DenseConfig) -> Vec<Box<
             max_entries: config.ngram_max_entries,
         }));
     }
-    // Stage G (input, lossy): trim/select tool schemas (resent every call).
-    if config.tool_select || config.tool_trim_desc {
+    // Stage G (input, lossy): trim/select tool schemas + API-safe schema minification (resent
+    // every call).
+    if config.tool_select || config.tool_trim_desc || config.tool_minify_schema {
         stages.push(Box::new(stages::ToolStage {
             select: config.tool_select,
             trim_desc: config.tool_trim_desc,
+            minify_schema: config.tool_minify_schema,
             max_desc_chars: config.tool_max_desc_chars,
         }));
     }

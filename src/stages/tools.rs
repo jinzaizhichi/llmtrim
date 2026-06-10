@@ -25,6 +25,7 @@ use crate::provider::Provider;
 pub struct ToolStage {
     pub select: bool,
     pub trim_desc: bool,
+    pub minify_schema: bool,
     pub max_desc_chars: usize,
 }
 
@@ -50,10 +51,64 @@ impl Transform for ToolStage {
         if self.select {
             select_tools(req, provider);
         }
+        // Minify each surviving tool's parameter schema before the description trim, so the
+        // trim's char cap also lands on any per-property descriptions the minifier kept.
+        if self.minify_schema {
+            minify_tool_schemas(req, self.max_desc_chars);
+        }
         if self.trim_desc {
             provider.truncate_tool_descriptions(req, self.max_desc_chars);
         }
         Ok(())
+    }
+}
+
+/// Keys a tool's parameter JSON Schema sits under directly (after descending into an OpenAI
+/// Chat `function` wrapper, handled in [`minify_tool_schemas`]): Anthropic `input_schema`,
+/// OpenAI Chat/Responses `parameters`. Tried in order; both are checked since a malformed tool
+/// could carry either.
+const SCHEMA_KEYS: [&str; 2] = ["input_schema", "parameters"];
+
+/// Apply the API-safe schema minifier ([`tool_schema::minify_schema`]) to every tool's
+/// parameter schema, in place. `tools` is a top-level array in all wire shapes; per element the
+/// schema is under `input_schema` / `parameters` (Anthropic, OpenAI Responses), nested under
+/// `function.parameters` (OpenAI Chat), or — for Gemini — one level deeper under each
+/// `functionDeclarations[].parameters`. Tools without an object schema are skipped. Kept
+/// provider-agnostic so no new trait method is needed (matches `tools_used_in_history`).
+fn minify_tool_schemas(req: &mut Request, max_desc_chars: usize) {
+    let Some(Value::Array(tools)) = req.raw_mut().get_mut("tools") else {
+        return;
+    };
+    for tool in tools.iter_mut() {
+        // Gemini groups callables under `functionDeclarations`; each carries its own schema.
+        if let Some(decls) = tool
+            .get_mut("functionDeclarations")
+            .and_then(Value::as_array_mut)
+        {
+            for d in decls.iter_mut() {
+                minify_schema_at(d, max_desc_chars);
+            }
+            continue;
+        }
+        // OpenAI Chat nests the callable under `function`; Responses/Anthropic are flat.
+        let scope = match tool.get_mut("function").filter(|f| f.is_object()) {
+            Some(f) => f,
+            None => tool,
+        };
+        minify_schema_at(scope, max_desc_chars);
+    }
+}
+
+/// Minify whichever parameter-schema field (`input_schema` / `parameters`) is present on a
+/// single tool/declaration object.
+fn minify_schema_at(scope: &mut Value, max_desc_chars: usize) {
+    let Some(obj) = scope.as_object_mut() else {
+        return;
+    };
+    for key in SCHEMA_KEYS {
+        if let Some(schema) = obj.get_mut(key) {
+            crate::stages::tool_schema::minify_schema(schema, max_desc_chars);
+        }
     }
 }
 
@@ -166,9 +221,31 @@ const LANG_DETECT_MAX_BYTES: usize = 8 * 1024;
 /// content suffices (already-invoked tools are protected separately).
 const TOOL_QUERY_MAX_BYTES: usize = 16 * 1024;
 
-/// Keep only tools whose name/description shares a content word with the
-/// conversation. Safety: if nothing matches, keep all tools (never strip the whole
-/// toolset on a weak query).
+/// BM25F field weights (ToolRegistry, arXiv:2507.10593, 2025): a tool's NAME is the strongest
+/// relevance signal — a query naming the operation it wants (`weather`, `sql`) should match the
+/// tool called that far above one that merely mentions it in prose — so the name field is boosted
+/// well over description. Parameter property names are load-bearing too (`city`, `query`), between
+/// name and description. Description text is the weak field (advisory, often boilerplate), weight
+/// 1. Name ×4 sits mid-range of ToolRegistry's 3–5× name boost.
+const FIELD_W_NAME: f64 = 4.0;
+const FIELD_W_PARAMS: f64 = 2.0;
+const FIELD_W_DESC: f64 = 1.0;
+
+/// BM25 saturation `k1` and length-normalization `b` — the standard defaults (Robertson &
+/// Zaragoza, "The Probabilistic Relevance Framework", 2009). Tool documents are short and
+/// uniform, so the exact constants matter little; these are the conventional, well-understood
+/// values.
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+/// Keep only tools that BM25F-rank as relevant to the conversation, plus any already invoked.
+/// Safety: if nothing scores, keep all tools (never strip the whole toolset on a weak query).
+///
+/// Upgrades the former lexical keyword-overlap test to fielded BM25 (BM25F, ToolRegistry
+/// arXiv:2507.10593): each tool is a 3-field document — name (boosted), parameter property
+/// names, description — scored against the same conversation-derived query as before. Fielding
+/// lets a query that names a tool outrank one that only mentions the term in a long description,
+/// which flat overlap (and flat BM25) cannot distinguish.
 fn select_tools(req: &mut Request, provider: &dyn Provider) {
     let descriptors = provider.tool_descriptors(req);
     if descriptors.len() < 2 {
@@ -176,11 +253,10 @@ fn select_tools(req: &mut Request, provider: &dyn Provider) {
     }
 
     let pointers = provider.content_text_pointers(req);
-    // Build the query word-set from the most-recent content only, bounded by
-    // `TOOL_QUERY_MAX_BYTES`: scanning newest-first and stopping at the cap keeps this O(cap)
-    // instead of O(whole resent prompt), which was the stage's dominant cost. The query word-set
-    // borrows slices out of `lower` (no per-word allocation); already-invoked tools are kept
-    // regardless (below), so bounding the scan can't dangle a `tool_use`.
+    // Build the query text from the most-recent content only, bounded by `TOOL_QUERY_MAX_BYTES`:
+    // scanning newest-first and stopping at the cap keeps this O(cap) instead of O(whole resent
+    // prompt), the stage's former dominant cost. Already-invoked tools are kept regardless
+    // (below), so bounding the scan can't dangle a `tool_use`.
     let mut lower = String::new();
     for p in pointers.iter().rev() {
         if let Some(s) = req.get_str(p) {
@@ -198,22 +274,168 @@ fn select_tools(req: &mut Request, provider: &dyn Provider) {
         return;
     }
 
-    // Never drop a tool the agent already invoked earlier in the conversation: its
-    // `tool_use` block would dangle (and the agent clearly needs it). Multi-turn safety.
+    // Per-tool fielded documents (aligned to `descriptors` / the tools array order). Property
+    // names come from the raw schema; provider-agnostic, like `tools_used_in_history`.
+    let param_fields = tool_param_words(req, &stop);
+    let docs: Vec<ToolDoc> = descriptors
+        .iter()
+        .enumerate()
+        .map(|(i, (name, desc))| ToolDoc {
+            name: bag(&content_words(&name.to_lowercase(), &stop)),
+            params: param_fields.get(i).cloned().unwrap_or_default(),
+            desc: bag(&content_words(&desc.to_lowercase(), &stop)),
+        })
+        .collect();
+    let scores = bm25f_scores(&docs, &query);
+
+    // Never drop a tool the agent already invoked earlier in the conversation: its `tool_use`
+    // block would dangle (and the agent clearly needs it). Multi-turn safety — independent of
+    // the BM25F score.
     let used = tools_used_in_history(req);
     let keep: Vec<bool> = descriptors
         .iter()
-        .map(|(name, desc)| {
-            if used.contains(name) {
-                return true;
-            }
-            let tool_lower = format!("{name} {desc}").to_lowercase();
-            !query.is_disjoint(&content_words(&tool_lower, &stop))
-        })
+        .zip(&scores)
+        .map(|((name, _), &s)| used.contains(name) || s > 0.0)
         .collect();
     if keep.iter().any(|&k| k) {
         provider.retain_tools(req, &keep);
     }
+}
+
+/// A tool as a 3-field bag-of-content-words document for BM25F: tokenized name, parameter
+/// property names, and description (each a `(term, term-frequency)` list). Built with the same
+/// `content_words` tokenization as the query (Unicode-segmented, snake_case-split, stopwords
+/// dropped) so terms live in one space.
+#[derive(Default)]
+struct ToolDoc {
+    name: Vec<(String, u32)>,
+    params: Vec<(String, u32)>,
+    desc: Vec<(String, u32)>,
+}
+
+/// Collapse a content-word set into a `(term, count=1)` bag. The name/description fields are
+/// drawn from a `HashSet`, so each term appears once; BM25F still weights them by field.
+fn bag(words: &HashSet<&str>) -> Vec<(String, u32)> {
+    words.iter().map(|w| (w.to_string(), 1)).collect()
+}
+
+/// Parameter property names per tool (aligned to the tools array order), each as a `(term,
+/// frequency)` bag built with `content_words`. Property names (`city`, `start_date`) are
+/// load-bearing relevance signal, so BM25F scores them as their own field. Reads the raw
+/// `tools[]` directly across wire shapes: schema under `function.parameters` (OpenAI Chat),
+/// `parameters` (Responses / Gemini declaration), or `input_schema` (Anthropic). Empty for a
+/// tool with no `properties`.
+fn tool_param_words(req: &Request, stop: &HashSet<&str>) -> Vec<Vec<(String, u32)>> {
+    let Some(tools) = req.raw().get("tools").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for tool in tools {
+        // Gemini nests declarations one level deeper; each is its own tool entry downstream.
+        if let Some(decls) = tool.get("functionDeclarations").and_then(Value::as_array) {
+            for d in decls {
+                out.push(prop_name_bag(d, stop));
+            }
+            continue;
+        }
+        let scope = tool
+            .get("function")
+            .filter(|f| f.is_object())
+            .unwrap_or(tool);
+        out.push(prop_name_bag(scope, stop));
+    }
+    out
+}
+
+/// Content-word bag of the `properties` keys of whichever parameter schema a tool/declaration
+/// object carries (`input_schema` / `parameters`). Property *keys* only — values are the nested
+/// schemas, not relevance text.
+fn prop_name_bag(scope: &Value, stop: &HashSet<&str>) -> Vec<(String, u32)> {
+    let props = SCHEMA_KEYS
+        .iter()
+        .find_map(|k| scope.pointer(&format!("/{k}/properties")))
+        .and_then(Value::as_object);
+    let Some(props) = props else {
+        return Vec::new();
+    };
+    let joined = props
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    bag(&content_words(&joined, stop))
+}
+
+/// BM25F score of every tool document against the query term-set (index-aligned to `docs`).
+///
+/// Canonical BM25F (Robertson, Zaragoza & Taylor, "Simple BM25 Extension to Multiple Weighted
+/// Fields", CIKM 2004): combine per-field term frequencies into one pseudo-TF with **per-field**
+/// length normalization, *then* apply a single BM25 saturation — not per-field BM25 summed
+/// (which double-saturates). `tf̃(t) = Σ_f W_f · tf_f(t) / (1 − b + b · len_f / avglen_f)`, and
+/// `score = Σ_t IDF(t) · tf̃(t) / (k1 + tf̃(t))`. IDF is the standard BM25 form over the tool
+/// corpus. Deterministic: pure arithmetic over the fixed term/field order.
+fn bm25f_scores(docs: &[ToolDoc], query: &HashSet<&str>) -> Vec<f64> {
+    let n = docs.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Per-field average length (in content-word tokens) across the corpus, for length norm.
+    let field_len = |d: &ToolDoc, f: usize| -> f64 {
+        let v = [&d.name, &d.params, &d.desc][f];
+        v.iter().map(|(_, c)| *c as u64).sum::<u64>() as f64
+    };
+    let weights = [FIELD_W_NAME, FIELD_W_PARAMS, FIELD_W_DESC];
+    let mut avg = [0.0f64; 3];
+    for (f, a) in avg.iter_mut().enumerate() {
+        let total: f64 = docs.iter().map(|d| field_len(d, f)).sum();
+        *a = (total / n as f64).max(1.0); // avoid div-by-zero on an all-empty field
+    }
+
+    // Document frequency of each query term: a tool "contains" the term if any field does.
+    let term_df = |term: &str| -> usize {
+        docs.iter()
+            .filter(|d| {
+                [&d.name, &d.params, &d.desc]
+                    .iter()
+                    .any(|fld| fld.iter().any(|(w, _)| w == term))
+            })
+            .count()
+    };
+    // Standard BM25 IDF, floored at 0 so a term in >half the tools can't push scores negative.
+    let idf = |term: &str| -> f64 {
+        let df = term_df(term) as f64;
+        (((n as f64 - df + 0.5) / (df + 0.5)) + 1.0).ln().max(0.0)
+    };
+    let idfs: Vec<(&str, f64)> = query.iter().map(|t| (*t, idf(t))).collect();
+
+    docs.iter()
+        .map(|d| {
+            let fields = [&d.name, &d.params, &d.desc];
+            let lens = [field_len(d, 0), field_len(d, 1), field_len(d, 2)];
+            idfs.iter()
+                .map(|(term, w_idf)| {
+                    // Combined, per-field-length-normalized pseudo-TF.
+                    let mut tf = 0.0f64;
+                    for f in 0..3 {
+                        let raw = fields[f]
+                            .iter()
+                            .find(|(w, _)| w == term)
+                            .map_or(0u32, |(_, c)| *c) as f64;
+                        if raw > 0.0 {
+                            let norm = 1.0 - BM25_B + BM25_B * lens[f] / avg[f];
+                            tf += weights[f] * raw / norm;
+                        }
+                    }
+                    if tf > 0.0 {
+                        w_idf * tf / (BM25_K1 + tf)
+                    } else {
+                        0.0
+                    }
+                })
+                .sum()
+        })
+        .collect()
 }
 
 /// Names of tools already invoked in the conversation — OpenAI `tool_calls[].function.name`,
@@ -409,6 +631,7 @@ mod tests {
         Box::new(ToolStage {
             select: true,
             trim_desc: false,
+            minify_schema: false,
             max_desc_chars: 200,
         })
     }
@@ -556,6 +779,7 @@ mod tests {
         let stages: Vec<Box<dyn Transform>> = vec![Box::new(ToolStage {
             select: true,
             trim_desc: true,
+            minify_schema: false,
             max_desc_chars: 50,
         })];
         pipeline::run(&mut req, &AnthropicProvider, counter.as_ref(), &stages);
@@ -590,6 +814,236 @@ mod tests {
         assert!(
             used.contains("get_weather"),
             "Google functionCall must be tracked"
+        );
+    }
+
+    // ── BM25F fielded tool selection ─────────────────────────────────────────────────────
+
+    /// Tool whose NAME matches the query term must outrank a tool that only carries the term in
+    /// its description — the whole point of fielding (flat overlap can't tell them apart).
+    #[test]
+    fn bm25f_name_match_outranks_description_match() {
+        let mk = |words: &[&str]| -> Vec<(String, u32)> {
+            words.iter().map(|w| (w.to_string(), 1)).collect()
+        };
+        let docs = vec![
+            // Tool A: "weather" is the NAME.
+            ToolDoc {
+                name: mk(&["weather"]),
+                params: mk(&["city"]),
+                desc: mk(&["forecast", "data"]),
+            },
+            // Tool B: "weather" appears only deep in the DESCRIPTION.
+            ToolDoc {
+                name: mk(&["search"]),
+                params: Vec::new(),
+                desc: mk(&["look", "up", "the", "weather", "and", "more"]),
+            },
+        ];
+        let query: HashSet<&str> = ["weather"].into_iter().collect();
+        let scores = bm25f_scores(&docs, &query);
+        assert!(
+            scores[0] > scores[1],
+            "name-field match must score above description-only: {scores:?}"
+        );
+    }
+
+    /// End-to-end through the pipeline: a query naming `run_sql` keeps it and drops the tool
+    /// that only mentions "sql" in prose-y description — and the kept set is non-empty.
+    #[test]
+    fn bm25f_selection_prefers_name_field_end_to_end() {
+        let body = json!({
+            "model":"gpt-4o",
+            "messages":[{"role":"user","content":"please run_sql on the users table"}],
+            "tools":[
+                {"type":"function","function":{"name":"run_sql","description":"Execute a query","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}},
+                {"type":"function","function":{"name":"notes","description":"Keep notes about sql and other topics you discuss","parameters":{}}}
+            ]
+        });
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let _ = pipeline::run(
+            &mut req,
+            &OpenAiProvider,
+            counter.as_ref(),
+            &[select_stage()],
+        );
+        let names: Vec<&str> = req
+            .raw()
+            .get("tools")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(
+            names.contains(&"run_sql"),
+            "name-matched tool kept: {names:?}"
+        );
+    }
+
+    /// An already-invoked tool survives selection even when it scores at the very bottom
+    /// (zero BM25F relevance to the current turn) — the multi-turn breaker is independent of
+    /// the score.
+    #[test]
+    fn bm25f_already_invoked_survives_at_rank_bottom() {
+        let body = json!({
+            "model":"gpt-4o",
+            "messages":[
+                {"role":"assistant","tool_calls":[{"function":{"name":"send_email"}}]},
+                {"role":"user","content":"now run a sql query on the orders table"}
+            ],
+            "tools": openai_tools()
+        });
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let _ = pipeline::run(
+            &mut req,
+            &OpenAiProvider,
+            counter.as_ref(),
+            &[select_stage()],
+        );
+        let names: Vec<&str> = req
+            .raw()
+            .get("tools")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains(&"run_sql"), "relevant tool kept");
+        assert!(
+            names.contains(&"send_email"),
+            "already-invoked tool kept despite zero relevance now: {names:?}"
+        );
+    }
+
+    /// BM25F scoring is deterministic — identical inputs yield byte-identical score vectors,
+    /// run to run (no hash-ordering or float-accumulation drift across the fixed term order).
+    #[test]
+    fn bm25f_is_deterministic() {
+        let mk = |words: &[&str]| -> Vec<(String, u32)> {
+            words.iter().map(|w| (w.to_string(), 1)).collect()
+        };
+        let docs = vec![
+            ToolDoc {
+                name: mk(&["weather", "city"]),
+                params: mk(&["city"]),
+                desc: mk(&["forecast"]),
+            },
+            ToolDoc {
+                name: mk(&["sql", "run"]),
+                params: mk(&["query"]),
+                desc: mk(&["database"]),
+            },
+            ToolDoc {
+                name: mk(&["email"]),
+                params: mk(&["to"]),
+                desc: mk(&["send", "message"]),
+            },
+        ];
+        let query: HashSet<&str> = ["weather", "city", "run"].into_iter().collect();
+        let a = bm25f_scores(&docs, &query);
+        let b = bm25f_scores(&docs, &query);
+        assert_eq!(a, b, "BM25F is deterministic");
+    }
+
+    /// Parameter property names feed the BM25F params field: a query term that appears only as a
+    /// tool's parameter name still selects it.
+    #[test]
+    fn bm25f_param_property_names_are_scored() {
+        let body = json!({
+            "model":"gpt-4o",
+            "messages":[{"role":"user","content":"set the timezone please"}],
+            "tools":[
+                {"type":"function","function":{"name":"configure","description":"adjust settings","parameters":{"type":"object","properties":{"timezone":{"type":"string"}}}}},
+                {"type":"function","function":{"name":"unrelated","description":"does other things","parameters":{}}}
+            ]
+        });
+        let mut req = Request::from_value(ProviderKind::OpenAi, body);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let _ = pipeline::run(
+            &mut req,
+            &OpenAiProvider,
+            counter.as_ref(),
+            &[select_stage()],
+        );
+        let names: Vec<&str> = req
+            .raw()
+            .get("tools")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(
+            names.contains(&"configure"),
+            "tool selected via its parameter name: {names:?}"
+        );
+    }
+
+    // ── Schema minification through the stage ────────────────────────────────────────────
+
+    /// The stage applies the schema minifier in place: `$schema`/`title` drop, single-type
+    /// arrays collapse, strict-mode `additionalProperties:false` + `required` survive — across
+    /// both the OpenAI `function.parameters` and Anthropic `input_schema` field shapes.
+    #[test]
+    fn stage_minifies_openai_and_anthropic_schemas() {
+        let verbose = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Args",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"q": {"type": ["string"], "title": "Q", "description": "text"}},
+            "required": ["q"]
+        });
+        // OpenAI Chat: schema under function.parameters.
+        let oa = json!({
+            "model":"gpt-4o",
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{"type":"function","function":{"name":"search","description":"d","parameters": verbose.clone()}}]
+        });
+        let mut req = Request::from_value(ProviderKind::OpenAi, oa);
+        let counter = counter_for(ProviderKind::OpenAi, Some("gpt-4o")).unwrap();
+        let stage: Vec<Box<dyn Transform>> = vec![Box::new(ToolStage {
+            select: false,
+            trim_desc: false,
+            minify_schema: true,
+            max_desc_chars: 300,
+        })];
+        pipeline::run(&mut req, &OpenAiProvider, counter.as_ref(), &stage);
+        let schema = req.raw().pointer("/tools/0/function/parameters").unwrap();
+        assert!(schema.get("$schema").is_none(), "$schema dropped");
+        assert!(schema.get("title").is_none(), "root title dropped");
+        assert_eq!(schema.get("additionalProperties"), Some(&json!(false)));
+        assert_eq!(schema.get("required"), Some(&json!(["q"])));
+        assert_eq!(
+            schema.pointer("/properties/q/type").and_then(Value::as_str),
+            Some("string"),
+            "single-type array collapsed"
+        );
+
+        // Anthropic: schema under input_schema.
+        let an = json!({
+            "max_tokens": 100,
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{"name":"search","description":"d","input_schema": verbose}]
+        });
+        let mut req = Request::from_value(ProviderKind::Anthropic, an);
+        let counter = counter_for(ProviderKind::Anthropic, None).unwrap();
+        let stage: Vec<Box<dyn Transform>> = vec![Box::new(ToolStage {
+            select: false,
+            trim_desc: false,
+            minify_schema: true,
+            max_desc_chars: 300,
+        })];
+        pipeline::run(&mut req, &AnthropicProvider, counter.as_ref(), &stage);
+        let schema = req.raw().pointer("/tools/0/input_schema").unwrap();
+        assert!(schema.get("$schema").is_none(), "anthropic $schema dropped");
+        assert_eq!(schema.get("additionalProperties"), Some(&json!(false)));
+        assert_eq!(
+            schema.pointer("/properties/q/type").and_then(Value::as_str),
+            Some("string")
         );
     }
 }

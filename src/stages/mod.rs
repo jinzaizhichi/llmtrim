@@ -12,6 +12,7 @@ pub mod retrieve;
 pub mod serialize;
 pub mod sizing;
 pub mod skeleton;
+pub mod tool_schema;
 pub mod toolout;
 pub mod tools;
 

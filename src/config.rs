@@ -109,6 +109,12 @@ pub struct DenseConfig {
     pub tool_select: bool,
     /// Stage G — truncate verbose tool descriptions.
     pub tool_trim_desc: bool,
+    /// Stage G — minify each tool's JSON Schema in place (drop `$schema`/`title`/`examples`,
+    /// collapse single-element type arrays, dedup repeated property descriptions, trim per-
+    /// property descriptions). The API-safe subset of TSCG (arXiv:2605.26165): stays valid JSON
+    /// Schema the provider accepts for native function-calling. Semantics-preserving, so on by
+    /// default wherever `tool_trim_desc` is.
+    pub tool_minify_schema: bool,
     /// Stage G — max characters for a tool description when trimming.
     pub tool_max_desc_chars: usize,
     /// Stage T — tool-output compression: window logs / diffs / grep output coming back
@@ -203,6 +209,7 @@ impl Default for DenseConfig {
             ngram_max_entries: 32,
             tool_select: false,
             tool_trim_desc: false,
+            tool_minify_schema: false,
             tool_max_desc_chars: 300,
             toolout: false,
             toolout_max_lines: 40,
@@ -332,6 +339,9 @@ impl DenseConfig {
             "agent" => {
                 c.tool_select = true;
                 c.tool_trim_desc = true;
+                // Minify tool schemas in place (API-safe TSCG subset): semantics-preserving, so
+                // it rides with description trimming — pure win on the tool block agents resend.
+                c.tool_minify_schema = true;
                 c.cache = true;
                 c.toolout = true; // window log/diff/grep tool results (the agent read path)
                 c.serialize_flatten = true; // dot-flatten nested tool-result JSON
@@ -377,6 +387,7 @@ impl DenseConfig {
                 c.normalize_unicode = true;
                 c.tool_select = true;
                 c.tool_trim_desc = true;
+                c.tool_minify_schema = true; // API-safe TSCG schema minify (rides with trim)
                 c.cache = true;
                 c.toolout = true; // compress log/diff/grep tool results (auto split)
                 c.serialize_flatten = true;
@@ -536,6 +547,28 @@ mod tests {
             );
         }
         assert!(!DenseConfig::preset("safe").unwrap().strip_base64);
+    }
+
+    #[test]
+    fn tool_minify_schema_rides_with_trim_desc() {
+        // The API-safe schema minify (TSCG subset) is semantics-preserving, so it is bundled in
+        // exactly the presets that already trim tool descriptions — `agent` and `aggressive`.
+        for p in ["agent", "aggressive"] {
+            let c = DenseConfig::preset(p).unwrap();
+            assert!(
+                c.tool_minify_schema && c.tool_trim_desc,
+                "preset `{p}` minifies tool schemas alongside description trimming"
+            );
+        }
+        // Presets that don't touch the tool block leave it off (no tool stage at all).
+        for p in ["safe", "code", "rag"] {
+            assert!(
+                !DenseConfig::preset(p).unwrap().tool_minify_schema,
+                "preset `{p}` does not minify tool schemas"
+            );
+        }
+        // Default (= `safe`) is off.
+        assert!(!DenseConfig::default().tool_minify_schema);
     }
 
     #[test]
