@@ -1,8 +1,9 @@
 //! `llmtrim setup` — the one-command bootstrap. llmtrim is *only* a MITM proxy, so
-//! integration is purely at the environment level: it ensures the local CA, writes a managed
-//! block to your shell profile (`HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS`) so every
-//! shell-launched tool routes through the interceptor and trusts the CA — **no IDE settings
-//! touched, no sudo** — enables run-at-login, and starts the daemon.
+//! integration is purely at the environment level: it ensures the local CA, then sets
+//! `HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS` for the user (POSIX: a managed shell-profile
+//! block; Windows: `HKCU\Environment`) so every newly-launched tool routes through the
+//! interceptor and trusts the CA — **no IDE settings touched, no sudo** — enables
+//! run-at-login, and starts the daemon.
 //!
 //! Best-effort and idempotent: a step that fails warns and the rest proceeds.
 
@@ -58,7 +59,37 @@ pub fn run(requested: Option<u16>) -> Result<()> {
     let proxy = format!("http://127.0.0.1:{port}");
     rows.push((ui::OK, "Local CA".into(), ca.clone()));
 
-    // 2. Route + trust at the environment level (shell profile managed block).
+    // 2. Route + trust at the environment level.
+    //
+    // POSIX: a managed block in the shell rc file (`export …`).
+    // Windows: the *user environment* in `HKCU\Environment`, NOT a shell profile — a profile
+    //   only helps PowerShell, and ExecutionPolicy can stop it loading entirely (the silent
+    //   "no traffic" trap). The registry is read by every process at launch (PS5, pwsh7, Git
+    //   Bash, cmd, GUI apps alike), independent of any profile running.
+    #[cfg(windows)]
+    {
+        set_user_env(&proxy, &ca)?;
+        rows.push((
+            ui::OK,
+            "Environment".into(),
+            "HKCU\\Environment — HTTPS_PROXY + CA trust".into(),
+        ));
+        // Upgrade path: drop any legacy managed block a previous version wrote to the
+        // PowerShell profile, so a dead (possibly ExecutionPolicy-blocked) block isn't
+        // left behind.
+        if let Ok(Some(path)) = remove_profile_block() {
+            rows.push((
+                ui::OK,
+                "Profile".into(),
+                format!("legacy env block removed from {}", path.display()),
+            ));
+        }
+        // Tell Explorer to re-read the environment so freshly-launched terminals/editors
+        // inherit it without a logout (a raw registry write alone is invisible to running
+        // processes).
+        broadcast_env_change();
+    }
+    #[cfg(not(windows))]
     let manual_env = match write_profile_block(&proxy, &ca)? {
         Some(path) => {
             rows.push((
@@ -108,24 +139,17 @@ pub fn run(requested: Option<u16>) -> Result<()> {
         ui::panel(color, "llmtrim setup", &ui::kv_rows(color, &rows))
     );
 
+    // On Windows the env is written to the registry above, never manually.
+    #[cfg(not(windows))]
     if manual_env {
         println!();
-        #[cfg(windows)]
-        {
-            println!("Set these in your PowerShell profile yourself:");
-            println!("    $env:HTTPS_PROXY = \"{proxy}\"");
-            println!("    $env:NODE_EXTRA_CA_CERTS = \"{ca}\"");
-        }
-        #[cfg(not(windows))]
-        {
-            println!("Export these in your shell yourself:");
-            println!("    export HTTPS_PROXY={proxy}");
-            println!("    export NODE_EXTRA_CA_CERTS={ca}");
-        }
+        println!("Export these in your shell yourself:");
+        println!("    export HTTPS_PROXY={proxy}");
+        println!("    export NODE_EXTRA_CA_CERTS={ca}");
     }
 
-    // The managed block only lands in *future* shells — already-running tools (editors,
-    // Claude Code, open terminals) keep their old environment until relaunched. Spell that
+    // The env only reaches *future* processes — already-running tools (editors, Claude
+    // Code, open terminals) keep their old environment until relaunched. Spell that
     // out: it's the #1 "why don't I see any traffic?" confusion.
     let check = if cfg!(windows) {
         "echo $env:HTTPS_PROXY"
@@ -148,12 +172,17 @@ pub fn run(requested: Option<u16>) -> Result<()> {
         );
     }
     println!(
-        "Only programs started from a new shell pick up the proxy env; already-running\n\
+        "Only programs started after this pick up the proxy env; already-running\n\
          tools (your editor, Claude Code, open terminals) keep their old environment\n\
          until relaunched. To route one through llmtrim:"
     );
     println!();
-    println!("  1. open a new terminal (or re-source your shell profile)");
+    let new_shell = if cfg!(windows) {
+        "open a new terminal (any shell — the env is set for your whole user)"
+    } else {
+        "open a new terminal (or re-source your shell profile)"
+    };
+    println!("  1. {new_shell}");
     println!("  2. verify it took:  {check}  →  {proxy}");
     println!("  3. launch your tool from that shell");
     println!();
@@ -167,7 +196,7 @@ pub fn run(requested: Option<u16>) -> Result<()> {
         ui::note(
             color,
             &format!(
-                "For non-PowerShell / GUI apps, trust the CA system-wide: \
+                "For GUI apps that pin their own trust store, trust the CA system-wide: \
                  certutil -addstore -user Root \"{ca}\" — or see llmtrim ca."
             )
         )
@@ -212,7 +241,34 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
         Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not changed: {e}"))),
     }
 
-    // 3. Remove the managed env block from the shell profile.
+    // 3. Remove the interceptor env. Windows: the `HKCU\Environment` values (plus any legacy
+    //    profile block a prior version left). POSIX: the managed block in the shell rc file.
+    #[cfg(windows)]
+    {
+        match clear_user_env() {
+            Ok(true) => rows.push((
+                ui::OK,
+                "Environment".into(),
+                "interceptor env removed from HKCU\\Environment".into(),
+            )),
+            Ok(false) => rows.push((
+                ui::NOTE,
+                "Environment".into(),
+                "no interceptor env to remove".into(),
+            )),
+            Err(e) => rows.push((ui::WARN, "Environment".into(), format!("not cleaned: {e}"))),
+        }
+        if let Ok(Some(path)) = remove_profile_block() {
+            rows.push((
+                ui::OK,
+                "Profile".into(),
+                format!("legacy env block removed from {}", path.display()),
+            ));
+        }
+        // Refresh Explorer's environment so new processes stop seeing the removed values.
+        broadcast_env_change();
+    }
+    #[cfg(not(windows))]
     match remove_profile_block() {
         Ok(Some(path)) => rows.push((
             ui::OK,
@@ -324,13 +380,120 @@ fn remove_profile_block() -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-/// Is the llmtrim env block present in the shell profile? Used to warn that stopping
-/// the daemon while `HTTPS_PROXY` still points at it will break the client's HTTPS.
+/// Is the interceptor env still wired up? Used to warn that stopping the daemon while
+/// `HTTPS_PROXY` still points at it will break the client's HTTPS. Windows reads the
+/// `HKCU\Environment` value; POSIX checks the shell-profile block.
 pub fn profile_has_block() -> bool {
-    profile_target()
-        .and_then(|(p, _)| std::fs::read_to_string(p).ok())
-        .map(|t| t.contains(BEGIN))
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        user_env_has_proxy()
+    }
+    #[cfg(not(windows))]
+    {
+        profile_target()
+            .and_then(|(p, _)| std::fs::read_to_string(p).ok())
+            .map(|t| t.contains(BEGIN))
+            .unwrap_or(false)
+    }
+}
+
+// ── Windows user environment (`HKCU\Environment`) ───────────────────────────────
+// On Windows the proxy env lives in the registry, not a shell profile: it's inherited by
+// every process at launch (PS5, pwsh7, Git Bash, cmd, GUI apps) and survives an
+// ExecutionPolicy that would block a profile from running. Only processes started after
+// the write see it — that's why setup still says "open a new terminal".
+
+/// The three values llmtrim manages in the user environment.
+#[cfg(windows)]
+const ENV_KEYS: [&str; 3] = ["HTTPS_PROXY", "HTTP_PROXY", "NODE_EXTRA_CA_CERTS"];
+
+/// Open `HKCU\Environment` for read+write (created if somehow absent).
+#[cfg(windows)]
+fn user_env_key() -> Result<winreg::RegKey> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (env, _) = hkcu
+        .create_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
+        .context("failed to open HKCU\\Environment")?;
+    Ok(env)
+}
+
+/// Set `HTTPS_PROXY`/`HTTP_PROXY`/`NODE_EXTRA_CA_CERTS` in the user environment.
+#[cfg(windows)]
+fn set_user_env(proxy: &str, ca: &str) -> Result<()> {
+    set_env_in(&user_env_key()?, proxy, ca)
+}
+
+/// Delete the managed values from the user environment. Returns true if anything was
+/// removed. Missing values are not an error (idempotent uninstall).
+#[cfg(windows)]
+fn clear_user_env() -> Result<bool> {
+    clear_env_in(&user_env_key()?)
+}
+
+/// Does the user environment's `HTTPS_PROXY` point at a local llmtrim interceptor?
+#[cfg(windows)]
+fn user_env_has_proxy() -> bool {
+    user_env_key().is_ok_and(|env| has_proxy_in(&env))
+}
+
+/// Broadcast `WM_SETTINGCHANGE("Environment")` so Explorer (and through it, newly-launched
+/// terminals, editors, and GUI apps) re-reads `HKCU\Environment` without a logout — a raw
+/// registry write alone is invisible until then (`setx` sends the same message). The call
+/// needs `SendMessageTimeout`, which is `unsafe` FFI this crate forbids
+/// (`unsafe_code = "forbid"`), so shell out to PowerShell with a one-shot P/Invoke.
+/// Best-effort: a failure just means "open a new shell" still applies; never breaks setup.
+#[cfg(windows)]
+fn broadcast_env_change() {
+    // HWND_BROADCAST = 0xffff, WM_SETTINGCHANGE = 0x1A, SMTO_ABORTIFHUNG = 0x2, 5 s timeout.
+    // (Keep this comment outside the PS string: the string is one line, so an inline `#`
+    // would comment out the rest of it and silently no-op the broadcast.)
+    const PS: &str = "\
+        $sig = '[DllImport(\"user32.dll\", SetLastError=true, CharSet=CharSet.Auto)]\
+        public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, \
+        string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);';\
+        $t = Add-Type -MemberDefinition $sig -Name NativeMethods -Namespace Win32 -PassThru;\
+        $r = [UIntPtr]::Zero;\
+        [void]$t::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x2, 5000, [ref]$r)";
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", PS])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+// The registry mechanics, taking the key as a seam so tests can exercise them against a
+// throwaway subkey instead of the real `HKCU\Environment`.
+
+#[cfg(windows)]
+fn set_env_in(env: &winreg::RegKey, proxy: &str, ca: &str) -> Result<()> {
+    env.set_value("HTTPS_PROXY", &proxy)
+        .context("failed to set HTTPS_PROXY")?;
+    env.set_value("HTTP_PROXY", &proxy)
+        .context("failed to set HTTP_PROXY")?;
+    env.set_value("NODE_EXTRA_CA_CERTS", &ca)
+        .context("failed to set NODE_EXTRA_CA_CERTS")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clear_env_in(env: &winreg::RegKey) -> Result<bool> {
+    let mut removed = false;
+    for key in ENV_KEYS {
+        match env.delete_value(key) {
+            Ok(()) => removed = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("failed to delete {key}")),
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(windows)]
+fn has_proxy_in(env: &winreg::RegKey) -> bool {
+    env.get_value::<String, _>("HTTPS_PROXY")
+        .is_ok_and(|v| v.contains("127.0.0.1"))
 }
 
 /// Which shell dialect the profile uses, so the managed block is written in its native syntax.
@@ -388,7 +551,9 @@ fn powershell_profile() -> Option<PathBuf> {
     )
 }
 
-/// The managed env block, in the profile's native syntax. Both variants are unit-tested.
+/// The managed env block, in the profile's native syntax. Both variants are unit-tested on
+/// every platform; on Windows the live env path is the registry, so this is test-only there.
+#[allow(dead_code)]
 fn env_block(proxy: &str, ca: &str, syntax: Syntax) -> String {
     match syntax {
         Syntax::Posix => format!(
@@ -409,7 +574,9 @@ fn env_block(proxy: &str, ca: &str, syntax: Syntax) -> String {
 }
 
 /// Replace (or append) the llmtrim managed block in the shell profile. Idempotent — a
-/// re-run updates the existing block rather than stacking duplicates.
+/// re-run updates the existing block rather than stacking duplicates. POSIX-only: on
+/// Windows the env lives in the registry, so `run()` never calls this there.
+#[allow(dead_code)]
 fn write_profile_block(proxy: &str, ca: &str) -> Result<Option<PathBuf>> {
     let Some((path, syntax)) = profile_target() else {
         return Ok(None);
@@ -486,6 +653,45 @@ mod tests {
     fn strip_block_reverses_powershell_block() {
         let withblock = format!("keep\n{}", env_block("p", "c", Syntax::PowerShell));
         assert_eq!(strip_block(&withblock), "keep\n");
+    }
+
+    // Exercise the registry set/has/clear cycle against a throwaway subkey under HKCU so
+    // the real `HKCU\Environment` is never touched. The process's own PID keys the scratch
+    // path so concurrent test runs don't collide.
+    #[cfg(windows)]
+    #[test]
+    fn registry_env_set_has_clear_roundtrip() {
+        use winreg::RegKey;
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let scratch = format!("Software\\llmtrim-test-{}", std::process::id());
+        let (env, _) = hkcu
+            .create_subkey_with_flags(&scratch, KEY_READ | KEY_WRITE)
+            .expect("create scratch key");
+
+        assert!(!has_proxy_in(&env), "fresh key has no proxy");
+        assert!(
+            !clear_env_in(&env).expect("clear on empty key"),
+            "nothing to clear yet"
+        );
+
+        set_env_in(&env, "http://127.0.0.1:18784", "C:\\Users\\u\\ca.pem").expect("set env");
+        assert!(has_proxy_in(&env), "proxy set");
+        assert_eq!(
+            env.get_value::<String, _>("NODE_EXTRA_CA_CERTS")
+                .expect("read CA value"),
+            "C:\\Users\\u\\ca.pem"
+        );
+
+        assert!(
+            clear_env_in(&env).expect("clear set values"),
+            "values removed"
+        );
+        assert!(!has_proxy_in(&env), "proxy gone after clear");
+
+        // Tidy up the scratch key.
+        hkcu.delete_subkey_all(&scratch).ok();
     }
 
     #[test]

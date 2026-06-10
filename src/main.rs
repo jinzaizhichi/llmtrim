@@ -361,7 +361,7 @@ fn run() -> Result<()> {
                         "{}",
                         ui::warn(
                             ui::color_stderr(),
-                            "HTTPS_PROXY still points at llmtrim in your shell profile — \
+                            "HTTPS_PROXY still points at llmtrim in your environment — \
                              new HTTPS to LLM hosts will fail until you start it again \
                              (llmtrim serve --daemon) or run llmtrim uninstall."
                         )

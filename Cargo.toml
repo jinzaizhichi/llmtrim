@@ -75,7 +75,17 @@ unicode-width = "0.2"
 ureq = "3.3.0"
 wait-timeout = "0.2.1"
 whatlang = "0.18.0"
+
+# macOS / Linux autostart (launchd agent / XDG .desktop entry); Windows uses the
+# registry Run key directly instead (src/autostart.rs).
+[target.'cfg(not(windows))'.dependencies]
 auto-launch = "0.6.0"
+
+# Windows: persist the proxy env (HTTPS_PROXY + NODE_EXTRA_CA_CERTS) in HKCU\Environment and
+# autostart via HKCU\Software\Microsoft\Windows\CurrentVersion\Run. winreg confines its own
+# unsafe to the crate, leaving our `unsafe_code = "forbid"` lint intact.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 
 [features]
 default = ["intercept"]
