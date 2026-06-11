@@ -135,6 +135,11 @@ pub struct Cost {
     /// Output spend from requests that carried the shaping instruction — the only spend
     /// the A/B benchmark factor may be projected onto.
     pub out_spend_shaped: f64,
+    /// The measured saving priced at the live-zone rate: cut tokens live in the
+    /// compressible zone, which bills as fresh (1×) / cache-write (1.25×) — never at the
+    /// ~10% cache-read rate the `net_saved` blend assumes. The honest mid of the
+    /// `net_saved → saved` range; equals `saved` when the traffic reports no usage split.
+    pub live_saved: f64,
 }
 
 impl Cost {
@@ -161,7 +166,9 @@ impl Cost {
 
 /// One per-model row in the breakdown table. `cost_saved`/`spend`/`out_spend` are the measured
 /// USD figures (present when the registry prices the model), used to project the per-model
-/// round-trip the same way the hero does.
+/// round-trip the same way the hero does. `cached` groups the table: a model whose traffic
+/// used the provider prompt cache reads its `$ saved` as list value (the real bill is
+/// cache-discounted), while un-cached traffic's `$ saved` comes straight off the bill.
 pub struct ModelView {
     pub name: String,
     pub events: i64,
@@ -169,6 +176,11 @@ pub struct ModelView {
     pub cost_saved: Option<f64>,
     pub spend: Option<f64>,
     pub out_spend: Option<f64>,
+    pub cached: bool,
+    /// Measured saving over this model's compressible (new-content) surface — the
+    /// frozen-zone meter's per-model %. `None` until the model has metered rows; the
+    /// table then falls back to `saved_pct` (the all-input figure).
+    pub new_pct: Option<f64>,
 }
 
 // ── rendering helpers ───────────────────────────────────────────────────────────
@@ -381,6 +393,9 @@ pub fn snapshot(
     // so any output saving is a benchmark projection that only holds when output is actually
     // shaped — projecting it onto agent traffic (output left unshaped by design) would
     // overstate the number ~2.7×. We surface it separately, clearly labeled, below.
+    // Hero — the biggest TRUE numbers first: tokens trimmed (measured, absolute) and the
+    // dollars that actually came off the bill (`net_saved`, cache-discounted). The gross
+    // list-rate figure moves to a dim support line below: it's the ceiling, not the claim.
     let hero = match cost {
         Some(c) => {
             // Anchor the all-time number in the present: "what did it do for me today?"
@@ -389,11 +404,20 @@ pub fn snapshot(
                 .filter(|t| *t >= 0.005)
                 .map(|t| ui::paint(color, Tone::Dim, &format!(" · today ${t:.2}")))
                 .unwrap_or_default();
+            // The $ headline is the live-zone estimate when usage data supports it (cut
+            // tokens bill at the fresh/write rate, not the cache-read blend) — marked `~`;
+            // the measured floor moves to the ladder line below. Without a usage split the
+            // two coincide and the figure prints unmarked.
+            let real = if c.live_saved > c.net_saved + 0.005 {
+                format!("~${:.2} off your real bill", c.live_saved)
+            } else {
+                format!("${:.2} off your real bill", c.net_saved)
+            };
             format!(
-                "{}{}   {} round-trip   {} requests",
-                ui::paint(color, Tone::Accent, &format!("${:.2} saved", c.saved)),
+                "{} trimmed{}   {}   {} requests",
+                ui::paint(color, Tone::Accent, &format!("{} tokens", ui::human(s.saved()))),
                 today,
-                ui::paint(color, Tone::Bold, &format!("-{:.0}%", c.pct())),
+                ui::paint(color, Tone::Bold, &real),
                 ui::commas(s.events),
             )
         }
@@ -409,16 +433,15 @@ pub fn snapshot(
     };
     o.push('\n');
     let title = if cost.is_some() {
-        "saved (input · measured)"
+        "llmtrim"
     } else {
         "saved (all time)"
     };
     o.push_str(&ui::panel(color, title, &[hero]));
     o.push('\n');
-    // The headline values cut tokens at list input rates. Where the provider billed part
-    // of the prompt at cache-read/write rates, the slice that actually came off the bill
-    // is smaller — print it right under the hero so the big number never needs defending.
-    // Hidden when the traffic uses no prompt cache (the two figures coincide).
+    // The honesty ladder, one quiet line: the same cut is worth more at list rates — show
+    // the ceiling so the hero floor never reads as the whole story. Hidden when the traffic
+    // uses no prompt cache (the two figures coincide).
     if let Some(c) = cost
         && c.net_saved + 0.005 < c.saved
     {
@@ -426,15 +449,26 @@ pub fn snapshot(
             color,
             Tone::Dim,
             &format!(
-                "  ≈ ${:.2} off your actual bill (after prompt-cache discounts)\n",
-                c.net_saved
+                "  floor ${:.2} measured off the bill · ${:.2} at list — the estimate prices the cut where it bills (cache writes run 1.25×)\n",
+                c.net_saved, c.saved
             ),
         ));
     }
 
-    // axes
+    // savings axes, one gauge language for the whole section
+    o.push_str(&ui::paint(color, Tone::Dim, "\n savings\n"));
     o.push_str(&axis(color, "input", s.input_before, s.input_after));
     o.push('\n');
+    // New-content axis — the same saving measured over the compressible surface only
+    // (input minus the frozen cached prefix the stages skip by design). Metered rows only,
+    // so the % is honest from the first metered request and never diluted by legacy rows.
+    let new_before = s.metered_input_before - s.frozen_input_tokens;
+    let new_after = s.metered_input_after - s.frozen_input_tokens;
+    if s.frozen_input_tokens > 0 && new_before > 0 {
+        o.push_str(&axis(color, "new", new_before, new_after));
+        o.push_str(&ui::paint(color, Tone::Dim, "   (outside your cached prefix)"));
+        o.push('\n');
+    }
     if s.output_events > 0 {
         // No live output baseline (the proxy never sees the un-instructed reply), so this is
         // the A/B benchmark factor, not a measurement — and it only holds where output is
@@ -455,13 +489,13 @@ pub fn snapshot(
         o.push('\n');
     }
     if s.cache_read_tokens > 0 {
-        // Prompt-cache reads bill at ~10% of input price → a flat 90% discount on the reused
-        // prefix. The bar shows that discount; the count is the volume served from cache.
+        // Cache-safety is a feature, not a savings bar: a full "−90%" bar here read as if
+        // llmtrim earned the cache discount. A ✓ status line says what we actually do —
+        // protect the frozen prefix so the provider's ~90% discount keeps applying.
         o.push_str(&format!(
-            "  {:<7} {} {:>6}   {} reused at ~10%\n",
+            "  {:<7} {}   {} tokens kept cache-hot — never recompressed\n",
             "cache",
-            bar(color, 90.0, 22),
-            ui::paint(color, Tone::Accent, "~-90%"),
+            ui::paint(color, Tone::Accent, ui::OK),
             ui::human(s.cache_read_tokens),
         ));
     }
@@ -469,25 +503,55 @@ pub fn snapshot(
     // by-model table — MEASURED input-side saving per model (matches the honest headline):
     // input % saved and the input-side $ saved where the registry prices the model. No output
     // projection here, so a model that serves agent traffic isn't credited an unshaped-output win.
+    // Grouped by cache usage when both kinds exist: un-cached $ comes straight off the bill,
+    // cached $ is list value (the real bill is already cache-discounted) — the honesty split
+    // is structural instead of an asterisk per row.
     if !models.is_empty() {
         o.push_str(&ui::paint(color, Tone::Dim, "\n by model\n"));
         let mut t = ui::table(color, &["model", "requests", "saved", "$ saved"]);
-        for m in models {
-            let pct = m.saved_pct;
-            let pct_tone = if pct >= 0.0 { Tone::Accent } else { Tone::Warn };
-            t.add_row(vec![
-                comfy_table::Cell::new(ui::truncate(&m.name, 28)),
-                ui::right(ui::commas(m.events)),
-                ui::right(ui::paint(color, pct_tone, &format!("{:+.0}%", -pct))),
-                ui::right(
-                    m.cost_saved
-                        .map(|c| ui::paint(color, Tone::Accent, &format!("${c:.2}")))
-                        .unwrap_or_default(),
-                ),
-            ]);
-        }
+        let grouped = models.iter().any(|m| m.cached) && models.iter().any(|m| !m.cached);
+        let add_rows = |t: &mut comfy_table::Table, cached: bool| {
+            if grouped {
+                let label = if cached {
+                    "cached · $ at list value"
+                } else {
+                    "un-cached · $ off the bill"
+                };
+                t.add_row(vec![comfy_table::Cell::new(ui::paint(
+                    color,
+                    Tone::Dim,
+                    label,
+                ))]);
+            }
+            for m in models.iter().filter(|m| m.cached == cached) {
+                // Metered models show the new-content % (the compressible surface, the
+                // honest big number); pre-meter models fall back to the all-input figure.
+                let pct = m.new_pct.unwrap_or(m.saved_pct);
+                let pct_tone = if pct >= 0.0 { Tone::Accent } else { Tone::Warn };
+                let name = ui::truncate(&m.name, 28);
+                t.add_row(vec![
+                    comfy_table::Cell::new(if grouped { format!("  {name}") } else { name }),
+                    ui::right(ui::commas(m.events)),
+                    ui::right(ui::paint(color, pct_tone, &format!("{:+.0}%", -pct))),
+                    ui::right(
+                        m.cost_saved
+                            .map(|c| ui::paint(color, Tone::Accent, &format!("${c:.2}")))
+                            .unwrap_or_default(),
+                    ),
+                ]);
+            }
+        };
+        add_rows(&mut t, false);
+        add_rows(&mut t, true);
         for line in t.to_string().lines() {
             o.push_str(&format!(" {line}\n"));
+        }
+        if models.iter().any(|m| m.new_pct.is_some()) {
+            o.push_str(&ui::paint(
+                color,
+                Tone::Dim,
+                " saved % measured on new content (outside the cached prefix) where metered\n",
+            ));
         }
     }
 
@@ -501,35 +565,22 @@ pub fn snapshot(
             ),
         ));
     }
-    if s.any_approximate {
-        o.push_str(&ui::paint(
-            color,
-            Tone::Dim,
-            " * some counts approximate (provider lacks a public tokenizer)\n",
-        ));
-    }
     if let Some(c) = cost {
         // Surface the output-side projection separately and clearly as an estimate — never
         // folded into the measured headline above. Projected ONLY onto the spend that
         // actually carried the shaping instruction; unshaped (agent) output is billed at
         // its own baseline, so there is nothing to project there.
+        // Only when the projection is real money — a perpetual "$0.01 more" footnote costs
+        // a line for no information (the output axis already carries the "est · if shaped"
+        // caveat, covering the shaping-off case too).
         let extra = c.projected_saved() - c.saved;
-        if extra > 0.005 {
+        if extra >= 1.0 {
             o.push_str(&ui::paint(
                 color,
                 Tone::Dim,
                 &format!(
                     " ~ + est. ${extra:.2} more saved by output shaping (A/B bench −73%); estimated, excluded from the headline.\n"
                 ),
-            ));
-        } else if c.out_spend > c.out_spend_shaped {
-            // Shaping is off for this traffic — by design on tool-calling (agent) requests,
-            // where terse instructions hurt quality for ~no win. Say so rather than leaving
-            // the output axis' "if output shaped" hanging.
-            o.push_str(&ui::paint(
-                color,
-                Tone::Dim,
-                " ~ output shaping off for agent traffic (protects tool-call quality); bench shows −73% where enabled.\n",
             ));
         }
     }
@@ -658,6 +709,9 @@ mod tests {
             avg_compress_micros: Some(310.0),
             cache_read_tokens: 1_200_000,
             last_ts: Some("2026-06-10T12:00:00+00:00".into()),
+            frozen_input_tokens: 0,
+            metered_input_before: 0,
+            metered_input_after: 0,
         }
     }
 
@@ -677,6 +731,7 @@ mod tests {
             spend: 9.0,
             out_spend: 3.0,
             net_saved: 12.47,      // no cache discount → net line hidden
+            live_saved: 12.47,
             out_spend_shaped: 3.0, // shaped → an output estimate exists to surface separately
         };
         let models = vec![ModelView {
@@ -686,12 +741,15 @@ mod tests {
             cost_saved: Some(4.10),
             spend: Some(6.0),
             out_spend: Some(0.0),
+            cached: false,
+            new_pct: None,
         }];
         let out = snapshot(false, None, &summ(), &models, Some(&cost), None);
-        // Headline shows the MEASURED input-side saving, not a projection that assumes shaping.
+        // Headline shows the MEASURED figures (tokens trimmed + real-bill $), not a
+        // projection that assumes shaping.
         assert!(
-            out.contains("$12.47 saved"),
-            "hero shows measured input saving"
+            out.contains("tokens trimmed") && out.contains("$12.47 off your real bill"),
+            "hero shows measured trimmed tokens + real-bill saving"
         );
         assert!(out.contains("1,204 requests"), "request count");
         assert!(
@@ -718,20 +776,19 @@ mod tests {
             spend: 10.0,
             out_spend: 5.0,
             net_saved: 10.0,
+            live_saved: 10.0,
             out_spend_shaped: 5.0,
         };
         let out = snapshot(false, None, &summ(), &[], Some(&cost), None);
         assert!(
-            out.contains("$10.00 saved"),
-            "headline = measured input saving"
+            out.contains("$10.00 off your real bill"),
+            "headline = measured net saving"
         );
         assert!(
-            !out.contains(&format!("${:.2} saved", cost.projected_saved())),
+            !out.contains(&format!("${:.2} off your real bill", cost.projected_saved())),
             "projected total ({:.2}) is not the headline",
             cost.projected_saved()
         );
-        // Round-trip % is the measured input-side pct (50%), not the projected one.
-        assert!(out.contains("-50%"), "measured round-trip pct in headline");
     }
 
     #[test]
@@ -742,6 +799,7 @@ mod tests {
             spend: 1.0,
             out_spend: 0.27,
             net_saved: 1.0,
+            live_saved: 1.0,
             out_spend_shaped: 0.27, // all of it carried the instruction
         };
         assert!((c.projected_saved() - 1.73).abs() < 1e-9);
@@ -758,43 +816,82 @@ mod tests {
             spend: 10.0,
             out_spend: 5.0,
             net_saved: 10.0,
+            live_saved: 10.0,
             out_spend_shaped: 0.0,
         };
         assert!((c.projected_saved() - c.saved).abs() < 1e-9);
         let out = snapshot(false, None, &summ(), &[], Some(&c), None);
+        // No footnote either way: the output axis' "(est · if output shaped)" tag carries
+        // the caveat; a dedicated line only appears when the projection is ≥ $1.
         assert!(!out.contains("more saved by output shaping"));
-        assert!(
-            out.contains("output shaping off for agent traffic"),
-            "explains why no output $ is claimed"
-        );
     }
 
     #[test]
     fn net_line_surfaces_cache_discounted_saving() {
         // Cache-heavy traffic: tokens cut are worth $100 at list rates but $25 came off
-        // the real (cache-discounted) bill. Both must be visible — the hero keeps the
-        // list-rate figure, the dim line right under it carries the net one.
+        // the real (cache-discounted) bill. Both must be visible — the hero leads with the
+        // real-bill figure, the dim line right under it carries the list-rate ceiling.
+        let c = Cost {
+            saved: 100.0,
+            spend: 50.0,
+            out_spend: 5.0,
+            net_saved: 25.0,
+            live_saved: 25.0,
+            out_spend_shaped: 0.0,
+        };
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None);
+        assert!(
+            out.contains("$25.00 off your real bill"),
+            "hero leads with the real-bill figure"
+        );
+        assert!(
+            out.contains("$100.00 at list"),
+            "list-rate ceiling printed under the hero"
+        );
+
+        // No prompt cache → the figures coincide → no redundant line.
+        let same = Cost {
+            net_saved: 100.0,
+            live_saved: 100.0,
+            ..c
+        };
+        let out = snapshot(false, None, &summ(), &[], Some(&same), None);
+        assert!(!out.contains("at list"));
+    }
+
+    #[test]
+    fn new_content_axis_and_live_hero() {
+        // Metered traffic: 1.0M of the 1.5M metered prompt is frozen prefix, so the
+        // compressible surface went 500K → 100K (−80%) — the axis the meter unlocks.
+        let mut s = summ();
+        s.frozen_input_tokens = 1_000_000;
+        s.metered_input_before = 1_500_000;
+        s.metered_input_after = 1_100_000;
         let c = Cost {
             saved: 100.0,
             spend: 50.0,
             out_spend: 5.0,
             net_saved: 25.0,
             out_spend_shaped: 0.0,
+            live_saved: 80.0,
         };
-        let out = snapshot(false, None, &summ(), &[], Some(&c), None);
-        assert!(out.contains("$100.00 saved"), "hero keeps list-rate figure");
+        let out = snapshot(false, None, &s, &[], Some(&c), None);
         assert!(
-            out.contains("≈ $25.00 off your actual bill"),
-            "net figure printed under the hero"
+            out.contains("~$80.00 off your real bill"),
+            "hero = live-zone estimate, ~-marked: {out}"
+        );
+        assert!(
+            out.contains("floor $25.00 measured"),
+            "measured floor on the ladder line: {out}"
+        );
+        assert!(
+            out.contains("500.0K → 100.0K") && out.contains("(outside your cached prefix)"),
+            "new-content axis over the compressible surface: {out}"
         );
 
-        // No prompt cache → the figures coincide → no redundant line.
-        let same = Cost {
-            net_saved: 100.0,
-            ..c
-        };
-        let out = snapshot(false, None, &summ(), &[], Some(&same), None);
-        assert!(!out.contains("off your actual bill"));
+        // No metered rows → no new-content axis (pre-meter ledgers unchanged).
+        let out = snapshot(false, None, &summ(), &[], Some(&c), None);
+        assert!(!out.contains("outside your cached prefix"));
     }
 
     #[test]
@@ -1018,6 +1115,7 @@ mod tests {
             spend: 50.0,
             out_spend: 0.0,
             net_saved: 100.0,
+            live_saved: 100.0,
             out_spend_shaped: 0.0,
         };
         let out = snapshot(false, None, &summ(), &[], Some(&cost), Some(1.84));

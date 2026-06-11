@@ -40,6 +40,10 @@ pub struct Record {
     /// instruction (Stage F ran and the compressed body was kept). `None` on rows recorded
     /// before this column existed.
     pub output_shaped: Option<bool>,
+    /// Tokens in the frozen (cache-controlled) prefix the stages skipped by cache-zone
+    /// discipline. `input_before − frozen` is the compressible surface — the honest
+    /// denominator for the "saved on new content" figure. `None` on pre-meter rows.
+    pub frozen_input_tokens: Option<i64>,
 }
 
 /// Per-provider aggregate row.
@@ -74,6 +78,13 @@ pub struct ModelRow {
     /// Output tokens from requests where the output-shaping instruction was actually
     /// forwarded — the only output the A/B bench factor may be projected onto.
     pub output_after_shaped: i64,
+    /// Frozen-zone meter sums over this model's metered rows (frozen recorded): total
+    /// frozen-prefix tokens and the input before/after of those same rows, so
+    /// `(metered_before − frozen) → (metered_after − frozen)` is the measured saving on
+    /// the model's compressible (new-content) surface. All zero on pre-meter rows.
+    pub frozen_input_tokens: i64,
+    pub metered_input_before: i64,
+    pub metered_input_after: i64,
 }
 
 /// Time-series bucket granularity for `by_period`.
@@ -133,6 +144,13 @@ pub struct Summary {
     /// rfc3339 UTC timestamp of the most recent recorded request (`None` on an empty
     /// ledger) — the end-to-end "traffic actually flows" signal for `status`.
     pub last_ts: Option<String>,
+    /// Frozen-zone meter sums, restricted to rows that recorded the meter (post-feature):
+    /// total frozen-prefix tokens, and the input before/after of those same rows — so
+    /// `(metered_before − frozen) → (metered_after − frozen)` is the measured saving on
+    /// the compressible (new-content) surface. All zero on pre-meter ledgers.
+    pub frozen_input_tokens: i64,
+    pub metered_input_before: i64,
+    pub metered_input_after: i64,
 }
 
 impl Summary {
@@ -228,7 +246,8 @@ impl Tracker {
                     cache_read_tokens INTEGER,
                     fresh_input_tokens INTEGER,
                     cache_write_tokens INTEGER,
-                    output_shaped INTEGER
+                    output_shaped INTEGER,
+                    frozen_input_tokens INTEGER
                 );",
             )
             .context("failed to migrate ledger schema")?;
@@ -242,6 +261,7 @@ impl Tracker {
             "fresh_input_tokens",
             "cache_write_tokens",
             "output_shaped",
+            "frozen_input_tokens",
         ] {
             if let Err(e) = self.conn.execute(
                 &format!("ALTER TABLE compressions ADD COLUMN {col} INTEGER"),
@@ -301,8 +321,8 @@ impl Tracker {
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
                      output_before, output_after, compress_micros, cache_read_tokens,
-                     fresh_input_tokens, cache_write_tokens, output_shaped)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     fresh_input_tokens, cache_write_tokens, output_shaped, frozen_input_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     ts,
                     r.provider,
@@ -318,6 +338,7 @@ impl Tracker {
                     r.fresh_input_tokens,
                     r.cache_write_tokens,
                     r.output_shaped.map(i64::from),
+                    r.frozen_input_tokens,
                 ],
             )
             .context("failed to record compression")?;
@@ -333,8 +354,8 @@ impl Tracker {
                 "INSERT INTO compressions
                     (ts, provider, model, tokenizer, exact, input_before, input_after,
                      output_before, output_after, compress_micros, cache_read_tokens,
-                     fresh_input_tokens, cache_write_tokens, output_shaped)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     fresh_input_tokens, cache_write_tokens, output_shaped, frozen_input_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     ts,
                     r.provider,
@@ -350,6 +371,7 @@ impl Tracker {
                     r.fresh_input_tokens,
                     r.cache_write_tokens,
                     r.output_shaped.map(i64::from),
+                    r.frozen_input_tokens,
                 ],
             )
             .context("failed to record compression (test)")?;
@@ -429,6 +451,22 @@ impl Tracker {
                 )
                 .context("failed to summarize latency + cache")?;
 
+        // Frozen-zone meter aggregates over the rows that have it (post-meter), so the
+        // new-content % is measured on a consistent population, never diluted by legacy rows.
+        let (frozen_input_tokens, metered_input_before, metered_input_after): (i64, i64, i64) =
+            self.conn
+                .query_row(
+                    "SELECT COALESCE(SUM(frozen_input_tokens), 0),
+                            COALESCE(SUM(CASE WHEN frozen_input_tokens IS NOT NULL
+                                THEN input_before ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN frozen_input_tokens IS NOT NULL
+                                THEN input_after ELSE 0 END), 0)
+                     FROM compressions",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .context("failed to summarize frozen-zone meter")?;
+
         Ok(Summary {
             events,
             input_before,
@@ -441,6 +479,9 @@ impl Tracker {
             avg_compress_micros,
             cache_read_tokens,
             last_ts,
+            frozen_input_tokens,
+            metered_input_before,
+            metered_input_after,
         })
     }
 
@@ -474,7 +515,12 @@ impl Tracker {
                         COALESCE(SUM(COALESCE(fresh_input_tokens,
                             MAX(input_after - COALESCE(cache_read_tokens, 0), 0))), 0),
                         COALESCE(SUM(CASE WHEN output_shaped = 1
-                            THEN COALESCE(output_after, 0) ELSE 0 END), 0)
+                            THEN COALESCE(output_after, 0) ELSE 0 END), 0),
+                        COALESCE(SUM(frozen_input_tokens), 0),
+                        COALESCE(SUM(CASE WHEN frozen_input_tokens IS NOT NULL
+                            THEN input_before ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN frozen_input_tokens IS NOT NULL
+                            THEN input_after ELSE 0 END), 0)
                  FROM compressions {where_clause} GROUP BY provider, model ORDER BY provider, model",
             ))
             .context("failed to prepare model summary")?;
@@ -491,6 +537,9 @@ impl Tracker {
                     cache_write: row.get(7)?,
                     fresh_input_est: row.get(8)?,
                     output_after_shaped: row.get(9)?,
+                    frozen_input_tokens: row.get(10)?,
+                    metered_input_before: row.get(11)?,
+                    metered_input_after: row.get(12)?,
                 })
             })
             .context("failed to query model summary")?;
@@ -577,6 +626,7 @@ mod tests {
             fresh_input_tokens: None,
             cache_write_tokens: None,
             output_shaped: None,
+            frozen_input_tokens: None,
         }
     }
 
@@ -625,6 +675,34 @@ mod tests {
     }
 
     #[test]
+    fn frozen_meter_sums_metered_rows_only() {
+        let t = Tracker::open_in_memory().unwrap();
+        // Pre-meter row (frozen NULL) — must not dilute the metered population.
+        t.record(&rec("anthropic", true, 1000, 900)).unwrap();
+        // Metered row: 600 of 1000 frozen → compressible surface 400 → 300.
+        let mut r = rec("anthropic", true, 1000, 900);
+        r.frozen_input_tokens = Some(600);
+        t.record(&r).unwrap();
+
+        let s = t.summary().unwrap();
+        assert_eq!(s.frozen_input_tokens, 600);
+        assert_eq!(s.metered_input_before, 1000, "metered rows only");
+        assert_eq!(s.metered_input_after, 900);
+        // Global sums still cover everything.
+        assert_eq!(s.input_before, 2000);
+
+        // Per-model meter: same restriction to metered rows.
+        let models = t.by_model().unwrap();
+        let m = models
+            .iter()
+            .find(|m| m.provider == "anthropic")
+            .expect("anthropic row");
+        assert_eq!(m.frozen_input_tokens, 600);
+        assert_eq!(m.metered_input_before, 1000, "metered rows only");
+        assert_eq!(m.metered_input_after, 900);
+    }
+
+    #[test]
     fn output_tokens_round_trip_and_aggregate() {
         let t = Tracker::open_in_memory().unwrap();
 
@@ -643,6 +721,7 @@ mod tests {
             fresh_input_tokens: Some(80),
             cache_write_tokens: Some(12),
             output_shaped: Some(true),
+            frozen_input_tokens: None,
         })
         .unwrap();
 
@@ -661,6 +740,7 @@ mod tests {
             fresh_input_tokens: None,
             cache_write_tokens: None,
             output_shaped: Some(false),
+            frozen_input_tokens: None,
         })
         .unwrap();
 
@@ -708,6 +788,11 @@ mod tests {
         assert_eq!(gpt.cache_write, 12);
         assert_eq!(gpt.fresh_input_est, 80, "row1 usage + row2 fallback of 0");
         assert_eq!(gpt.output_after_shaped, 42);
+
+        // Frozen-zone meter: row 1 metered (frozen NULL → both rows here are pre-meter),
+        // so the metered sums stay zero — see `frozen_meter_sums_metered_rows_only`.
+        assert_eq!(s.frozen_input_tokens, 0);
+        assert_eq!(s.metered_input_before, 0);
         let m = models
             .iter()
             .find(|m| m.model.as_deref() == Some("m"))

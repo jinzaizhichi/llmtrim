@@ -80,6 +80,7 @@ unicode-width = "0.2"
 ureq = "3.3.0"
 wait-timeout = "0.2.1"
 whatlang = "0.18.0"
+ctrlc = "3.5.2"
 
 # macOS / Linux autostart (launchd agent / XDG .desktop entry); Windows uses the
 # registry Run key directly instead (src/autostart.rs).

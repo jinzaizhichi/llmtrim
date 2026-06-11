@@ -242,6 +242,9 @@ mod imp {
         /// True when the *forwarded* body carried the output-shaping instruction (Stage F
         /// ran and the compressed body was kept, not a passthrough/replay).
         output_shaped: bool,
+        /// Frozen (cache-controlled) prefix tokens the stages skipped — the new-content
+        /// meter for the ledger.
+        frozen_input_tokens: Option<i64>,
     }
 
     /// A verbatim copy of the client's request, for replay-on-error.
@@ -319,6 +322,7 @@ mod imp {
             fresh_input_tokens: usage.fresh_input,
             cache_write_tokens: usage.cache_write,
             output_shaped: Some(p.output_shaped),
+            frozen_input_tokens: p.frozen_input_tokens,
         }
     }
 
@@ -643,6 +647,7 @@ mod imp {
                 original: None,
                 // The forwarded original carries no shaping instruction.
                 output_shaped: false,
+                frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
             };
             return Some((text.to_string(), pending));
         }
@@ -666,6 +671,7 @@ mod imp {
             plan: serde_json::to_string(&result.plan).unwrap_or_default(),
             original: None,
             output_shaped: result.output_shaped,
+            frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
         };
         Some((result.request_json, pending))
     }
@@ -1918,6 +1924,7 @@ mod imp {
                     body: original_body.to_vec(),
                 }),
                 output_shaped: false,
+                frozen_input_tokens: None,
             });
 
             let bad_resp = Response::builder()
@@ -1972,6 +1979,7 @@ mod imp {
                 plan: "[]".to_string(),
                 original: None,
                 output_shaped: false,
+                frozen_input_tokens: None,
             });
 
             let bad_resp = Response::builder()
@@ -2019,6 +2027,7 @@ mod imp {
                     body: b"{}".to_vec(),
                 }),
                 output_shaped: false,
+                frozen_input_tokens: None,
             });
 
             let unprocessable = Response::builder()
@@ -2067,6 +2076,7 @@ mod imp {
                         body: b"{}".to_vec(),
                     }),
                     output_shaped: false,
+                    frozen_input_tokens: None,
                 });
 
                 let resp = Response::builder()
@@ -2119,6 +2129,7 @@ mod imp {
                 plan: "[]".to_string(),
                 original: None,
                 output_shaped: false,
+                frozen_input_tokens: None,
             });
 
             let sse_chunks = concat!(
@@ -2212,6 +2223,7 @@ mod imp {
                 plan: "[]".to_string(),
                 original: None,
                 output_shaped: false,
+                frozen_input_tokens: None,
             });
 
             // The complete SSE payload.
@@ -2312,6 +2324,7 @@ mod imp {
                 plan: "[]".to_string(),
                 original: None,
                 output_shaped: false,
+                frozen_input_tokens: None,
             });
 
             // Three chunks; the client will consume only the first then drop the body.
@@ -2385,6 +2398,7 @@ mod imp {
                 plan: "[]".to_string(),
                 original: None,
                 output_shaped: false,
+                frozen_input_tokens: None,
             });
 
             // Zero-chunk stream: body ends immediately.

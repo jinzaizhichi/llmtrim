@@ -52,6 +52,9 @@ pub struct CompressResult {
     pub tokenizer_exact: bool,
     pub input_tokens_before: Tokens,
     pub input_tokens_after: Tokens,
+    /// Tokens in the frozen (cache-controlled) prefix the stages skipped — see
+    /// [`pipeline::PipelineOutcome::frozen_input_tokens`].
+    pub frozen_input_tokens: Tokens,
     pub stages: Vec<StageReport>,
     /// Whether Stage F (output shaping) ran on this request — i.e. the *effective* config
     /// (after `auto` routing) enabled it. The ledger needs this to project the benchmark
@@ -269,6 +272,7 @@ pub fn compress_with_config(
         tokenizer_exact: counter.is_exact(),
         input_tokens_before: outcome.input_tokens_before,
         input_tokens_after: outcome.input_tokens_after,
+        frozen_input_tokens: outcome.frozen_input_tokens,
         stages: outcome.stages,
         output_shaped: config.output_control || config.output_compact_code,
     })

@@ -325,6 +325,7 @@ fn run() -> Result<()> {
                     fresh_input_tokens: None,
                     cache_write_tokens: None,
                     output_shaped: Some(result.output_shaped),
+                    frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
                 });
             }
 
@@ -367,6 +368,7 @@ fn run() -> Result<()> {
                         fresh_input_tokens: None,
                         cache_write_tokens: None,
                         output_shaped: Some(result.output_shaped),
+                        frozen_input_tokens: Some(result.frozen_input_tokens.0 as i64),
                     });
                 }
             }
@@ -1029,6 +1031,15 @@ fn model_views(tracker: &Tracker) -> Result<Vec<monitor::ModelView>> {
             // Per-model USD figures where the registry prices the model — used to project the
             // round-trip the same way the hero does.
             let priced = m.model.as_deref().and_then(llm_prices);
+            // Frozen-zone meter, per model: the saving over the compressible surface
+            // (metered rows only). `None` until traffic recorded the meter.
+            let new_before = m.metered_input_before - m.frozen_input_tokens;
+            let new_pct = (m.frozen_input_tokens > 0 && new_before > 0).then(|| {
+                ui::saved_pct(
+                    new_before as f64,
+                    (m.metered_input_after - m.frozen_input_tokens) as f64,
+                )
+            });
             let cost_saved = priced
                 .map(|(inp, _)| (m.input_before - m.input_after).max(0) as f64 / 1_000_000.0 * inp);
             let out_spend = priced.map(|(_, outp)| m.output_after as f64 / 1_000_000.0 * outp);
@@ -1045,6 +1056,8 @@ fn model_views(tracker: &Tracker) -> Result<Vec<monitor::ModelView>> {
                 cost_saved,
                 spend,
                 out_spend,
+                cached: m.cache_read > 0,
+                new_pct,
             }
         })
         .collect();
@@ -1084,36 +1097,74 @@ fn render_snapshot(tracker: &Tracker, color: bool) -> Result<(String, monitor::H
     Ok((out, health))
 }
 
-/// Live dashboard: clear + repaint each tick, with an input-token save-rate once we have
-/// two samples. Exits on Ctrl-C (default SIGINT).
+/// Restores the normal screen buffer when the watch loop unwinds (error/broken pipe).
+/// The Ctrl-C path can't rely on Drop (`process::exit` skips destructors), so the
+/// signal handler in [`run_watch`] writes the same escape itself.
+struct AltScreenGuard;
+
+impl Drop for AltScreenGuard {
+    fn drop(&mut self) {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[?1049l");
+        let _ = out.flush();
+    }
+}
+
+/// Live dashboard. On a TTY it runs in the alternate screen buffer (the user's
+/// scrollback survives, like htop/less), repaints in place — home + per-line
+/// clear-to-EOL instead of a full-screen wipe, wrapped in synchronized-output marks
+/// (DEC 2026) so capable terminals commit each frame atomically: no flicker, no
+/// infinite scroll. Piped/redirected output keeps plain appended frames. Exits on
+/// Ctrl-C, restoring the normal screen.
 fn run_watch(tracker: &Tracker, interval: u64) -> Result<()> {
     let color = ui::color_stdout();
-    // Screen-control escapes (clear + home) are for interactive terminals only —
-    // piped/redirected watch output gets appended frames instead of raw escapes.
+    // Screen-control escapes are for interactive terminals only — piped/redirected
+    // watch output gets appended frames instead of raw escapes.
     let tty = ui::stdout_is_tty();
+    let _alt = if tty {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[?1049h\x1b[H");
+        let _ = out.flush();
+        // Default SIGINT would kill the process inside the alternate screen, leaving
+        // the terminal stuck in it — restore first, then exit.
+        let _ = ctrlc::set_handler(|| {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b[?1049l");
+            let _ = out.flush();
+            std::process::exit(0);
+        });
+        Some(AltScreenGuard)
+    } else {
+        None
+    };
     let mut prev: Option<i64> = None;
     loop {
         let summary = tracker.summary()?;
-        let mut frame = if tty {
-            String::from("\x1b[2J\x1b[H") // clear screen + cursor home
-        } else {
-            String::new()
-        };
-        frame.push_str(&render_snapshot(tracker, color)?.0);
+        let mut body = render_snapshot(tracker, color)?.0;
         if let Some(p) = prev {
             let rate = (summary.saved() - p) as f64 / interval as f64;
             // Only show the rate when traffic actually flowed this interval — a perpetual
             // "+0/s" on an idle proxy reads like fake data.
             if rate.abs() >= 0.5 {
-                frame.push_str(&format!("\n  {rate:+.0} input tokens/s saved\n"));
+                body.push_str(&format!("\n  {rate:+.0} input tokens/s saved\n"));
             }
         }
         prev = Some(summary.saved());
-        frame.push_str(&ui::paint(
+        body.push_str(&ui::paint(
             color,
             Tone::Dim,
             &format!("  refreshing every {interval}s · Ctrl-C to exit\n"),
         ));
+        let frame = if tty {
+            // Sync-begin + home, overwrite each line clearing its tail (`\x1b[K`), then
+            // clear everything below the new frame (`\x1b[0J`) and sync-end.
+            format!(
+                "\x1b[?2026h\x1b[H{}\x1b[0J\x1b[?2026l",
+                body.replace('\n', "\x1b[K\n")
+            )
+        } else {
+            body
+        };
         // Write, don't print!: a piped reader that exits (e.g. `| head`) closes the
         // pipe, and print! would panic on the broken pipe — exit cleanly instead.
         let mut stdout = std::io::stdout();
@@ -1250,6 +1301,7 @@ fn cost_estimate(models: &[llmtrim::tracking::ModelRow]) -> Option<monitor::Cost
         out_spend: 0.0,
         net_saved: 0.0,
         out_spend_shaped: 0.0,
+        live_saved: 0.0,
     };
     let mut matched = false;
     for m in models {
@@ -1276,6 +1328,18 @@ fn cost_estimate(models: &[llmtrim::tracking::ModelRow]) -> Option<monitor::Cost
                 0.0
             };
             cost.net_saved += net_bill * pct / (1.0 - pct);
+            // Live-zone attribution: the cut happens in the compressible zone, billed as
+            // fresh (1×) + cache writes (1.25× on Anthropic) — never at the ~10% read rate
+            // the net blend assumes — so price the cut at that mix. No usage split recorded
+            // → rate 1.0, degrading to the list figure.
+            let live_used = m.fresh_input_est + m.cache_write;
+            let live_rate = if live_used > 0 {
+                (m.fresh_input_est as f64 + m.cache_write as f64 * write_mult.max(1.0))
+                    / live_used as f64
+            } else {
+                1.0
+            };
+            cost.live_saved += delta / 1_000_000.0 * input_price * live_rate;
             matched = true;
         }
     }

@@ -40,6 +40,10 @@ pub struct PipelineOutcome {
     pub plan: Vec<PlanEntry>,
     pub input_tokens_before: Tokens,
     pub input_tokens_after: Tokens,
+    /// Tokens inside the frozen (cache-controlled) prefix — content the stages never touch
+    /// by cache-zone discipline. `input − frozen` is the compressible surface, the honest
+    /// denominator for "how much of what we CAN compress did we compress".
+    pub frozen_input_tokens: Tokens,
 }
 
 /// Tokens over the content text segments the model reads (system + messages).
@@ -142,6 +146,19 @@ pub fn run_gated(
     let mut content = count_content_cached(req, provider, counter, &mut seg_cache);
     let mut tools = count_tools(req, counter);
     let input_tokens_before = content + tools;
+    // Frozen-zone meter: size of the cache-controlled prefix the stages will skip. Counted
+    // once up front (the zone is immutable by discipline); `seg_cache` is already warm from
+    // the full content count, so this is hash lookups, not a second BPE pass.
+    let frozen_input_tokens: usize = crate::cache_zone::frozen_pointers(req, provider)
+        .iter()
+        .filter_map(|p| req.get_str(p))
+        .map(|s| {
+            seg_cache
+                .get(s)
+                .copied()
+                .unwrap_or_else(|| counter.count(s))
+        })
+        .sum();
 
     for stage in stages {
         let before = content + tools;
@@ -247,6 +264,7 @@ pub fn run_gated(
         plan,
         input_tokens_before: Tokens(input_tokens_before),
         input_tokens_after: Tokens(input_tokens_after),
+        frozen_input_tokens: Tokens(frozen_input_tokens),
     }
 }
 
