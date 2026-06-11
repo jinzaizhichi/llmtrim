@@ -57,7 +57,7 @@ A drop-in HTTPS proxy that compresses every LLM request and reply. **Any provide
   </tbody>
 </table>
 
-Every case is sent twice: the original request and the compressed one. Both answers are scored and priced at real provider rates (`qwen/qwen3-next-80b-a3b-instruct` — a popular cheap instruct model). **Compression doesn't cost quality — pooled answer quality is +3.3pp (95% CI ±5.6, n=112)**: trimming the noise helps the model at least as often as it hurts (hotpotqa +21.5pp, dolly/chat +8.3pp; worst is gsm8k −8.3pp at n=12).
+Every case runs twice — original vs compressed — both answered live, scored, and priced at real `qwen/qwen3-next-80b-a3b-instruct` rates. Quality isn't the price of the savings: it edges **up +3.3pp** ([per-corpus detail](bench/README.md)).
 
 The token cuts are fixed (−31% input, −74% output); the **cost** % tracks the model's output:input price ratio — −66% here, −44% to −59% on others ([details](bench/README.md)). Reasoning models save less: their hidden thinking is billed as output that prompt-side shaping can't trim.
 

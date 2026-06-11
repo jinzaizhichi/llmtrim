@@ -27,24 +27,27 @@ Across **112 A/B cases** on this real-usage mix (generation, chat, reasoning, co
 
 | corpus | shape | n | input saved | output saved | cost saved | cache used | quality (orig→comp) | retention |
 |---|---|--:|--:|--:|--:|--:|:--:|--:|
-| `gsm8k` | Reasoning (CoT) | 7 | -46% | 94% | 25% | 0% | 43%→71% | +29pp |
-| `humaneval` | Code generation | 12 | -15% | 29% | 27% | 0% | 100%→100% | +0pp |
-| `dolly` | Generation (instruction) | 12 | 35% | 87% | 77% | 0% | 75%→58% | -17pp |
-| `hotpotqa` | Multi-hop RAG | 12 | 50% | 14% | 5% | 0% | 60%→54% | -6pp |
-| `glaive` | Agent / tool-use | 12 | 20% | 0% | 8% | 0% | 100%→100% | +0pp |
-| `chat` | Multi-turn chat | 12 | 35% | 72% | 64% | 0% | 25%→33% | +8pp |
-| `cnn` | Long-doc summary | 8 | 6% | 18% | 10% | 0% | 21%→22% | +1pp |
-| `cache` | Prompt-cache reuse | 12 | 0% | 0% | -3% | 73% | 100%→100% | +0pp |
+| `gsm8k` | Reasoning (CoT) | 12 | -47% | 77% | 71% | 0% | 100%→92% | -8pp |
+| `humaneval` | Code generation | 12 | -13% | 22% | 18% | 0% | 100%→100% | +0pp |
+| `dolly` | Generation (instruction) | 12 | 35% | 91% | 89% | 0% | 75%→83% | +8pp |
+| `hotpotqa` | Multi-hop RAG | 12 | 39% | 63% | 42% | 0% | 55%→76% | +21pp |
+| `glaive` | Agent / tool-use | 12 | 19% | 0% | 5% | 0% | 100%→100% | +0pp |
+| `chat` | Multi-turn chat | 12 | 38% | 75% | 71% | 0% | 25%→33% | +8pp |
+| `cnn` | Long-doc summary | 8 | -3% | 12% | 7% | 0% | 22%→24% | +2pp |
+| `cache` | Prompt-cache reuse | 12 | 0% | 0% | 6% | 17% | 100%→100% | +0pp |
+| `toolout` | Tool output (mixed) | 10 | 84% | 93% | 88% | 0% | 100%→100% | +0pp |
+| `tl_ours` | Tool output (logs) | 5 | 88% | 93% | 89% | 0% | 100%→100% | +0pp |
+| `tl_rtk` | Tool output (grep) | 5 | -29% | 87% | 66% | 0% | 100%→100% | +0pp |
 
 ## Key findings
 
-**Where compression wins** (cost cut, quality not significantly down):
-- `gsm8k`: **cost −25%**, quality 43%→71% (+29±45pp).
-- `humaneval`: **cost −27%**, quality 100%→100% (+0±0pp).
-- `dolly`: **cost −77%**, quality 75%→58% (-17±33pp).
-- `chat`: **cost −64%**, quality 25%→33% (+8±31pp).
+**Where compression wins big** (cost cut, quality held or up):
+- Tool output (`toolout`/`tl_ours`/`tl_rtk`): **cost −66% to −89%**, quality 100%→100% — the cleanest win (logs/diffs/grep are mostly droppable noise).
+- `dolly`: **cost −89%**, quality 75%→83% (+8pp).
+- `chat`: **cost −71%**, quality 25%→33% (+8pp).
+- `hotpotqa`: **cost −42%**, quality 55%→76% (+21pp) — retrieval drops distractors the model was tripping on.
 
-**Within noise at this n** (negative but CI crosses zero — *not* confirmed regressions): `dolly` (-17±33pp). Scale n to resolve.
+**Where it can't help** (nothing to cut): `glaive` (short tool-call output, cost −5%), `cache` (prefix already cached). `gsm8k` is the one quality dip (−8pp at n=12): the reasoning preset's Chain-of-Draft scaffold trades a small accuracy risk for −71% cost — measure per workload before enabling.
 
 **The headline:** the per-stage **token gate guarantees fewer tokens, not preserved quality** — only this A/B quality axis catches the difference. The two regressions we confirmed and fixed were measured on **gpt-oss-20b** (a stronger model with tighter intervals): `code`'s compact-code output **−21.6±14.5pp** at n=37 → dropped from the preset; and `aggressive`+n-gram on `adult` **−100pp** (deterministic) → `ngram` now skips JSON records (recovers to 100%). On a weaker/noisier model the same levers mostly land inside their CIs — measure per model, and reserve lossy stages for inputs whose exact surface form the task doesn't depend on.
 
