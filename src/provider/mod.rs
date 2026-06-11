@@ -261,18 +261,26 @@ pub(crate) fn retain_tools_array(req: &mut Request, keep: &[bool]) {
 
 /// Truncate `s` to at most `max` chars, appending `…` when shortened.
 ///
-/// Boundary-aware: fills the budget with whole sentences (Unicode sentence
-/// segmentation, so any script works), falling back to whole lines, then whole
-/// words — never cutting mid-word. Slight undershoot of the budget is expected.
+/// Boundary-aware and salience-aware: the first sentence (the tool's one-line
+/// identity) is always kept, then the remaining budget is filled with whole
+/// sentences preferring those dense in code-like identifiers or enumeration
+/// members (a language-neutral lexical signal — plain prose ranks lowest).
+/// Original sentence order is preserved; skipped runs are elided with a
+/// single " … " marker. Falls back to whole lines, then whole words, when the
+/// first sentence alone exceeds the budget — never cutting mid-word. Slight
+/// undershoot of the budget is expected.
 pub(crate) fn truncate_chars(s: &mut String, max: usize) {
     use unicode_segmentation::UnicodeSegmentation;
 
     if s.chars().count() <= max {
         return;
     }
-    let keep_bytes = fit_units(s.split_sentence_bounds(), max)
-        .or_else(|| fit_units(s.split_inclusive('\n'), max))
-        .or_else(|| fit_units(s.split_word_bounds(), max));
+    if let Some(out) = select_salient_sentences(s, max) {
+        *s = out;
+        return;
+    }
+    let keep_bytes =
+        fit_units(s.split_inclusive('\n'), max).or_else(|| fit_units(s.split_word_bounds(), max));
     match keep_bytes {
         Some(n) => {
             s.truncate(n);
@@ -283,6 +291,134 @@ pub(crate) fn truncate_chars(s: &mut String, max: usize) {
         None => *s = s.chars().take(max).collect(),
     }
     s.push('…');
+}
+
+/// Marker spliced between kept sentences that are not adjacent in the source.
+const ELISION: &str = " … ";
+
+/// Salience-aware sentence selection: keep the first sentence, then fill the
+/// remaining budget with the highest-scoring sentences (ties broken by source
+/// order), emitted in original order with `ELISION` over skipped runs.
+/// `None` when the first sentence alone does not fit (caller falls back).
+fn select_salient_sentences(s: &str, max: usize) -> Option<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let sents: Vec<&str> = s.split_sentence_bounds().collect();
+    let chars: Vec<usize> = sents.iter().map(|u| u.trim_end().chars().count()).collect();
+    if sents.is_empty() || chars[0] > max {
+        return None;
+    }
+
+    // Rank candidates (all but the mandatory first) by identifier density.
+    let mut ranked: Vec<usize> = (1..sents.len()).collect();
+    let scores: Vec<f64> = sents.iter().map(|u| identifier_density(u)).collect();
+    ranked.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+
+    let elision_chars = ELISION.chars().count();
+    let mut keep = vec![false; sents.len()];
+    keep[0] = true;
+    let mut used = chars[0];
+    for i in ranked {
+        // Pessimistic cost: the sentence plus one elision marker for the gap
+        // it may open. Adjacent picks undershoot, which is fine.
+        if used + chars[i] + elision_chars <= max {
+            keep[i] = true;
+            used += chars[i] + elision_chars;
+        }
+    }
+
+    // Rebuild from contiguous runs of the original text so adjacent sentences
+    // keep their exact source bytes (no separator is invented between them).
+    let mut out = String::new();
+    let mut offset = 0usize;
+    let mut run_start: Option<usize> = None; // byte offset where current run began
+    for (i, u) in sents.iter().enumerate() {
+        if keep[i] && run_start.is_none() {
+            if !out.is_empty() {
+                out.push_str(ELISION);
+            }
+            run_start = Some(offset);
+        }
+        if !keep[i]
+            && let Some(start) = run_start.take()
+        {
+            out.push_str(s[start..offset].trim_end());
+        }
+        offset += u.len();
+        if i + 1 == sents.len()
+            && let Some(start) = run_start.take()
+        {
+            out.push_str(s[start..offset].trim_end());
+        }
+    }
+    // Trailing ellipsis only when the tail itself was dropped — interior
+    // elisions are already marked.
+    if !keep[sents.len() - 1] {
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// Fraction of whitespace-separated tokens that look code-like: backticked
+/// spans, underscores, `::`, digits, mixed case after the first char,
+/// hyphenated compounds, or comma-separated enumeration members. Purely
+/// lexical — no language- or tool-specific lists.
+fn identifier_density(sentence: &str) -> f64 {
+    let mut total = 0usize;
+    let mut hits = 0usize;
+    for tok in sentence.split_whitespace() {
+        total += 1;
+        if is_code_like(tok) {
+            hits += 1;
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        hits as f64 / total as f64
+    }
+}
+
+fn is_code_like(tok: &str) -> bool {
+    if tok.contains('`') || tok.contains('_') || tok.contains("::") {
+        return true;
+    }
+    // Comma-separated enumeration member ("foo, bar, baz" — each but the last
+    // ends with a comma).
+    let body = tok
+        .strip_suffix(',')
+        .map(|b| (b, true))
+        .unwrap_or((tok, false));
+    let (word, is_member) = body;
+    if is_member && word.chars().any(char::is_alphanumeric) {
+        return true;
+    }
+    if word.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // Mixed case beyond an ordinary capitalized word: an uppercase letter
+    // after the first char alongside lowercase (camelCase, PascalCase).
+    let has_lower = word.chars().any(char::is_lowercase);
+    let late_upper = word.chars().skip(1).any(char::is_uppercase);
+    if has_lower && late_upper {
+        return true;
+    }
+    // Hyphenated compound with alphanumerics on both sides (kebab-case).
+    word.match_indices('-').any(|(i, _)| {
+        word[..i]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+            && word[i + 1..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// Byte length of the longest prefix of contiguous `units` whose total char
@@ -440,6 +576,37 @@ mod tests {
             trunc(input, 25),
             "これは最初の文です。これは二番目の文です。…"
         );
+    }
+
+    #[test]
+    fn identifier_sentence_survives_mid_text() {
+        let input = "Launches a specialized agent to handle the task. \
+            The agent runs in its own context and reports back when finished. \
+            Valid types: general-purpose, code-reviewer, test-runner. \
+            Results may take a while to arrive depending on the task.";
+        // Budget can't hold everything: the enumeration sentence must win over
+        // the prose sentences around it, with elision markers in between.
+        let out = trunc(input, 120);
+        assert!(out.starts_with("Launches a specialized agent to handle the task."));
+        assert!(
+            out.contains("Valid types: general-purpose, code-reviewer, test-runner."),
+            "{out}"
+        );
+        assert!(out.contains(" … "), "{out}");
+        assert!(!out.contains("reports back"), "{out}");
+        assert!(out.chars().count() <= 121, "{out}"); // budget + trailing …
+    }
+
+    #[test]
+    fn elision_marker_not_duplicated_when_tail_kept() {
+        let input = "Tool identity sentence here. Some filler prose in the middle of it. \
+            Use `run_command` with `--flag` and `path/to_file`.";
+        let out = trunc(input, 105);
+        // Identifier-heavy tail kept, prose middle elided; no trailing … since
+        // the true ending is present and the gap is already marked.
+        assert!(out.contains("`run_command`"), "{out}");
+        assert!(out.contains(" … "), "{out}");
+        assert!(!out.ends_with('…'), "{out}");
     }
 
     #[test]
