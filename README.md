@@ -77,10 +77,10 @@ rtk and caveman each compress one layer; [Headroom](https://github.com/chopratej
 |---|:---:|:---:|:---:|:---:|
 | Whole round-trip (input · output · cache) | ✅ | input only | CLI only | output only |
 | **Can't increase your bill** (auto-revert gate) | ✅ | ❌ | ✅ | ❌ |
-| Quality measured **live** (A/B: saved *and* kept) | ✅ | offline evals | ❌ | tokens only |
-| No Python · no models · single binary | ✅ | ❌ | ✅ | ✅ |
+| **Live A/B**: savings *and* answer quality | ✅ | offline evals | ❌ | tokens only |
+| Install: one static binary | ✅ | Python + GB models | ✅ | ✅ |
 | **Overhead it adds / request** | **<10 ms** | 52 ms median\* | <10 ms | n/a |
-| Deterministic (no ML variance, no downloads) | ✅ | ❌ | ✅ | ✅ |
+| Deterministic: same request → same result | ✅ | ❌ | ✅ | ✅ |
 
 <sub>\* Headroom's own production telemetry (161 ms mean, 4.2 s P99) — sources in the comparison below.</sub>
 
