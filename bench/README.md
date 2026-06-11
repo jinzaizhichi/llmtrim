@@ -2,24 +2,25 @@
 
 Two axes, measured live: **tokens saved** (real tokenizer, at compress time) and **quality retained** (the A/B delta between the model's answer on the *original* vs the *compressed* request). A preset is only honest if quality holds at its token saving — the frontier of (saved, retained) is the benchmark, not the saving alone.
 
-- **Model:** `openai/gpt-oss-20b` via OpenRouter, pinned to the **Groq** upstream (async-openai byot — the exact compressed body is sent, injected fields intact).
+- **Model:** `qwen/qwen3-next-80b-a3b-instruct` via OpenRouter (async-openai byot — the exact compressed body is sent, injected fields intact). A cheap, strong, **non-reasoning** instruct model: its visible output is the whole billed output, so prompt-side output shaping (terse / Chain-of-Draft) translates to real cost. Reasoning models bill hidden chain-of-thought as output that no prompt-side lever can cut — the cost win shrinks there.
 - **Scoring:** ground-truth where possible (numeric-exact for math, pass@1 that *runs the unit tests* for code), token-F1 for extractive QA, tool-call match for agents, an LLM judge only for open-ended shapes.
-- **Cost:** priced from a pinned [models.dev](https://models.dev) snapshot (`bench/pricing.json`), Groq rates, cached input billed at the `cache_read` rate.
+- **Cost:** priced from a pinned [models.dev](https://models.dev) snapshot (`bench/pricing.json`), cached input billed at the `cache_read` rate.
 - **Cache used %:** share of compressed input served from the provider prompt cache (`usage.prompt_tokens_details.cached_tokens`).
 
 
 ## Bottom line
 
-Across **87 A/B cases** on this real-usage mix (generation, chat, reasoning, code, RAG, agent, summary, cache):
+Across **112 A/B cases** on this real-usage mix (generation, chat, reasoning, code, RAG, agent, summary, cache):
 
 | | original | compressed | saved |
 |---|--:|--:|--:|
-| input tokens | 58,518 | 44,379 | **24%** |
-| output tokens | 27,588 | 7,504 | **73%** |
-| **total tokens** | **86,106** | **51,883** | **40%** |
-| **round-trip cost** | **$0.0167** | **$0.0090** | **46%** |
+| input tokens | 71,031 | 49,062 | **31%** |
+| output tokens | 25,843 | 6,628 | **74%** |
+| **total tokens** | **96,874** | **55,690** | **43%** |
+| **round-trip cost** | **$0.0365** | **$0.0126** | **66%** |
+| **answer quality** | **78.9%** | **82.2%** | **+3.3pp** |
 
-**~46% cost cut, quality mostly held or improved.** Output is where it pays off — output tokens drop 73% via output-control, and real workloads are output-heavy. (An earlier input-heavy/short-output mix saved only ~9% — the lever was real but had nothing to cut; representative corpora surface the true savings.)
+**~66% cost cut, quality up +3.3pp.** Output is where it pays off — output tokens drop 74% via output-control, and real workloads are output-heavy. The cost % rides on the model's output:input price ratio (≈12:1 here); the underlying token cuts are model-independent (−31% input, −74% output), projecting to −57% / −59% at GPT-4o / Claude Sonnet rates and −44% on the input-heavy gpt-oss-20b. (An earlier input-heavy/short-output mix saved only ~9% — the lever was real but had nothing to cut; representative corpora surface the true savings.)
 
 
 ## Frontier

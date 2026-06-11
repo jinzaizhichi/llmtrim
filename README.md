@@ -1,18 +1,18 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/fkiene/llmtrim/main/logo.svg" alt="llmtrim" width="140">
+  <img src="logo.svg" alt="llmtrim" width="140">
 </p>
 
 <h1 align="center">llmtrim</h1>
 
 <p align="center">
-  <strong>Cut the whole LLM bill ~44% - input, output, and cache - with zero extra model calls.</strong>
+  <strong>Cut the whole LLM bill ~66% - input, output, and cache - with zero extra model calls.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml"><img src="https://github.com/fkiene/llmtrim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL v3"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
-  <img src="https://img.shields.io/badge/round--trip_cost-%E2%88%9244%25-2ea043" alt="round-trip cost saved">
+  <img src="https://img.shields.io/badge/round--trip_cost-%E2%88%9266%25-2ea043" alt="round-trip cost saved">
 </p>
 
 <p align="center">
@@ -30,12 +30,12 @@
 
 A drop-in HTTPS proxy that compresses every LLM request and reply. **Any provider, answers unchanged, no model in the loop.**
 
-## 💸 −44% of the bill - measured live, not estimated
+## 💸 −66% of the bill - measured live, not estimated
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/fkiene/llmtrim/main/bench/frontier-light.svg">
-    <img src="https://raw.githubusercontent.com/fkiene/llmtrim/main/bench/frontier-dark.svg" alt="llmtrim cuts the LLM round-trip bill both ends: original $0.0090 vs llmtrim $0.0050, −44% cost (output −75%, input −34%) across 112 live A/B cases" width="840">
+    <source media="(prefers-color-scheme: light)" srcset="bench/frontier-light.svg">
+    <img src="bench/frontier-dark.svg" alt="llmtrim cuts the LLM round-trip bill both ends: original $0.0365 vs llmtrim $0.0126, −66% cost (output −74%, input −31%) across 112 live A/B cases" width="840">
   </picture>
 </p>
 
@@ -49,17 +49,19 @@ A drop-in HTTPS proxy that compresses every LLM request and reply. **Any provide
     </tr>
   </thead>
   <tbody>
-    <tr><td>input tokens</td><td align="right">71,031</td><td align="right">46,623</td><td align="right"><b>−34%</b></td></tr>
-    <tr><td>output tokens</td><td align="right">31,878</td><td align="right">7,832</td><td align="right"><b>−75%</b></td></tr>
-    <tr><td>total tokens</td><td align="right">102,909</td><td align="right">54,455</td><td align="right"><b>−47%</b></td></tr>
-    <tr><td><b>round-trip cost</b></td><td align="right"><b>$0.0090</b></td><td align="right"><b>$0.0050</b></td><td align="right"><b>−44%</b></td></tr>
-    <tr><td><b>answer quality</b></td><td align="right"><b>70.6%</b></td><td align="right"><b>73.8%</b></td><td align="right"><b>+3.2pp</b></td></tr>
+    <tr><td>input tokens</td><td align="right">71,031</td><td align="right">49,062</td><td align="right"><b>−31%</b></td></tr>
+    <tr><td>output tokens</td><td align="right">25,843</td><td align="right">6,628</td><td align="right"><b>−74%</b></td></tr>
+    <tr><td>total tokens</td><td align="right">96,874</td><td align="right">55,690</td><td align="right"><b>−43%</b></td></tr>
+    <tr><td><b>round-trip cost</b></td><td align="right"><b>$0.0365</b></td><td align="right"><b>$0.0126</b></td><td align="right"><b>−66%</b></td></tr>
+    <tr><td><b>answer quality</b></td><td align="right"><b>78.9%</b></td><td align="right"><b>82.2%</b></td><td align="right"><b>+3.3pp</b></td></tr>
   </tbody>
 </table>
 
-Every case is sent twice: the original request and the compressed one. Both answers are scored and priced at real provider rates (`openai/gpt-oss-20b` via Groq). **Compression doesn't cost quality — pooled answer quality is +3.2pp (95% CI ±5.6, n=112)**: trimming the noise helps the model at least as often as it hurts (toolout +10pp, humaneval +8.3pp, hotpotqa +4.9pp; worst corpus is n=5 with a CI spanning zero).
+Every case is sent twice: the original request and the compressed one. Both answers are scored and priced at real provider rates (`qwen/qwen3-next-80b-a3b-instruct` — a popular cheap instruct model). **Compression doesn't cost quality — pooled answer quality is +3.3pp (95% CI ±5.6, n=112)**: trimming the noise helps the model at least as often as it hurts (hotpotqa +21.5pp, dolly/chat +8.3pp; worst is gsm8k −8.3pp at n=12).
 
-The −44% is measured on a budget model whose pricing is unusually input-heavy. Frontier models bill output 5× input, which is where llmtrim saves most (−75%): the **same measured token deltas re-priced at frontier rates project to −61% (GPT-4o) / −63% (Claude Sonnet 4.5)** — a projection (`bench/scripts/chart.py` prints it), not a separate live run.
+The token cuts underneath are **model-independent** — −31% input, −74% output. The *cost* % rides on the model's output:input price ratio: **−66% here** (≈12:1), **−57% / −59% projected at GPT-4o / Claude Sonnet rates** (`bench/scripts/chart.py` prints these), and −44% on the input-heavy gpt-oss-20b. Reasoning models are the exception — their hidden chain-of-thought is billed as output that prompt-side shaping can't cut, so the cost win shrinks there.
+
+It holds outside the bench too: dogfooding the proxy on real Claude Code traffic, llmtrim cuts **−68% of the compressible input** (everything outside the provider's cached prefix — measured per-request by the built-in meter, `llmtrim status` shows yours) while **never touching the cached prefix**, so the ~90% prompt-cache discount you already get stays intact.
 
 Pooled over 112 cases the win is both ends: input and output. Per-corpus deltas are noisy at n≈12; trust the pooled figure. [Methodology + per-corpus frontier →](bench/README.md)
 
@@ -142,14 +144,14 @@ llmtrim setup     # local CA + HTTPS_PROXY/NODE_EXTRA_CA_CERTS in your shell pro
   tool ──request──▶ LLM API                     tool ──request──▶ llmtrim ──compressed──▶ LLM API
    ▲                  │                           ▲                  │  (gate · stream)      │
    └──── response ────┘                           └──── response ────┴── pass-through ───────┘
-        full bill                                          −44% bill, answer unchanged
+        full bill                                          −66% bill, answer unchanged
 ```
 
 Open a new shell and your tools route through it. Then:
 
 ```bash
 llmtrim status        # health + savings: ● running · ✓ port ✓ env ✓ ca · $ saved · by-model
-llmtrim monitor --watch   # live, refreshing - watch the bill shrink in real time
+llmtrim status --watch    # live, refreshing - watch the bill shrink in real time
 llmtrim doctor        # something off? end-to-end diagnosis, each failing check names its fix
 llmtrim uninstall     # one command back out - reverses everything, transparently
 ```
@@ -160,13 +162,13 @@ llmtrim uninstall     # one command back out - reverses everything, transparentl
 <summary><strong>More proxy commands</strong></summary>
 
 ```bash
-llmtrim serve --daemon   # start the interceptor in the background (setup does this)
+llmtrim start            # start the interceptor in the background (setup does this)
 llmtrim serve            # or foreground (Ctrl-C to stop)
 llmtrim stop             # stop the daemon
 llmtrim update           # update to the latest release + restart the daemon (channel-aware)
 llmtrim autostart        # run at login (--off to disable)
 llmtrim ca               # print the CA path + how to trust it system-wide (for GUI apps)
-llmtrim monitor --daily  # time-series report (--weekly/--monthly); --json/--csv to export
+llmtrim status --daily   # time-series report (--weekly/--monthly); --json/--csv to export
 ```
 
 `monitor` is the one savings view: snapshot, `--watch`, `--daily/--weekly/--monthly`, and `--json/--csv` export (`status`/`gain` are aliases). The snapshot doubles as a health check: it verifies the whole chain (daemon → port → env → CA → traffic) and exits 0 healthy / 1 stopped / 2 degraded; `status -q` prints just `healthy|degraded|stopped` for scripts, and the JSON export carries the same under `daemon.health`.
