@@ -119,6 +119,43 @@ mod tests {
         assert_eq!(compress(&short, &test_ctx(), &HashSet::new()), None);
     }
 
+    /// Shape of the real defect (capture 1781203662905322-27117d, messages[34]): ~120
+    /// mostly-indented HTML-ish lines where the structural indentation prior used to
+    /// drown the query bonus, so the three ask-relevant middle lines were elided. With
+    /// distinct-hit scoring (0.2/word, cap 0.6) they must outrank plain indented lines
+    /// and survive a 30-line window.
+    #[test]
+    fn query_relevant_lines_beat_indentation_prior() {
+        let mut lines: Vec<String> = (0..120)
+            .map(|i| format!("    <td class=\"row-{i}\">status value pending</td>"))
+            .collect();
+        lines.insert(58, "      svg dark variant uses theme tokens".to_string());
+        lines.insert(
+            59,
+            "      prefers-color-scheme light maps the svg palette".to_string(),
+        );
+        lines.insert(
+            60,
+            "      light theme fallback for the embedded svg".to_string(),
+        );
+        let dump = lines.join("\n");
+        let query: HashSet<String> = ["svg".to_string(), "light".to_string(), "theme".to_string()]
+            .into_iter()
+            .collect();
+        let out = compress(&dump, &test_ctx(), &query).expect("fires");
+        assert!(
+            out.lines().count() < dump.lines().count(),
+            "windowing happened"
+        );
+        for needle in [
+            "svg dark variant",
+            "prefers-color-scheme light",
+            "light theme fallback",
+        ] {
+            assert!(out.contains(needle), "ask-relevant line kept: {needle}");
+        }
+    }
+
     #[test]
     fn query_relevant_line_survives() {
         let mut lines: Vec<String> = (0..80)

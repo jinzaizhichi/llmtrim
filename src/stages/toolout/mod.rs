@@ -277,15 +277,21 @@ pub(crate) fn priority(line: &str) -> f64 {
 
 /// Relevance bonus for a line overlapping the request's words (capped, additive on top
 /// of [`priority`]). Unicode-segmented, so it works in any language.
+///
+/// Counts *distinct* query words (repeating one word doesn't stack) at 0.2 each, capped
+/// at 0.6 — so two distinct ask-words on a plain line (0.3 + 0.4 = 0.7) outrank the 0.5
+/// indentation prior, and relevance can dominate purely structural scores in uniformly
+/// indented content (HTML/markdown/YAML). STRONG error lines ([`FORCE_PRIORITY`] = 1.0)
+/// still rank at or above any non-error line with up to two distinct hits.
 pub(crate) fn query_bonus(line: &str, query: &HashSet<String>) -> f64 {
     if query.is_empty() {
         return 0.0;
     }
-    let hits = lex_words(line)
+    let hits: HashSet<String> = lex_words(line)
         .into_iter()
         .filter(|w| query.contains(w))
-        .count();
-    (hits as f64 * 0.1).min(0.3)
+        .collect();
+    (hits.len() as f64 * 0.2).min(0.6)
 }
 
 /// Fill `keep` up to `budget` slots by picking the highest-scoring unfilled indices,
