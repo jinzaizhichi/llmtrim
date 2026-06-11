@@ -457,16 +457,18 @@ pub fn snapshot(
 
     // savings axes, one gauge language for the whole section
     o.push_str(&ui::paint(color, Tone::Dim, "\n savings\n"));
-    o.push_str(&axis(color, "input", s.input_before, s.input_after));
-    o.push('\n');
-    // New-content axis — the same saving measured over the compressible surface only
-    // (input minus the frozen cached prefix the stages skip by design). Metered rows only,
-    // so the % is honest from the first metered request and never diluted by legacy rows.
+    // Input axis — measured over the compressible surface only (input minus the frozen
+    // cached prefix the stages skip by design), the honest % of what we're allowed to
+    // touch. Metered rows only, so the figure is never diluted by legacy rows; ledgers
+    // with no metered traffic yet fall back to the all-input axis.
     let new_before = s.metered_input_before - s.frozen_input_tokens;
     let new_after = s.metered_input_after - s.frozen_input_tokens;
     if s.frozen_input_tokens > 0 && new_before > 0 {
-        o.push_str(&axis(color, "new", new_before, new_after));
-        o.push_str(&ui::paint(color, Tone::Dim, "   (outside your cached prefix)"));
+        o.push_str(&axis(color, "input", new_before, new_after));
+        o.push_str(&ui::paint(color, Tone::Dim, "   (new content · cache excluded)"));
+        o.push('\n');
+    } else {
+        o.push_str(&axis(color, "input", s.input_before, s.input_after));
         o.push('\n');
     }
     if s.output_events > 0 {
@@ -885,13 +887,18 @@ mod tests {
             "measured floor on the ladder line: {out}"
         );
         assert!(
-            out.contains("500.0K → 100.0K") && out.contains("(outside your cached prefix)"),
-            "new-content axis over the compressible surface: {out}"
+            out.contains("500.0K → 100.0K") && out.contains("(new content · cache excluded)"),
+            "input axis over the compressible surface: {out}"
+        );
+        assert!(
+            !out.contains("2.1M → 1.2M"),
+            "diluted all-input axis replaced, not shown alongside: {out}"
         );
 
-        // No metered rows → no new-content axis (pre-meter ledgers unchanged).
+        // No metered rows → fall back to the all-input axis (pre-meter ledgers unchanged).
         let out = snapshot(false, None, &summ(), &[], Some(&c), None);
-        assert!(!out.contains("outside your cached prefix"));
+        assert!(!out.contains("cache excluded"));
+        assert!(out.contains("2.1M → 1.2M"), "fallback axis: {out}");
     }
 
     #[test]
