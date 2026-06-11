@@ -98,7 +98,7 @@ fn suffix_array(s: &[u32]) -> Vec<u32> {
             let second = if i + k < n { rank[i + k] } else { -1 };
             (rank[i], second)
         };
-        sa.sort_by(|&a, &b| key(a as usize).cmp(&key(b as usize)));
+        sa.sort_by_key(|&a| key(a as usize));
         // Recompute ranks from the new order; equal adjacent keys share a rank.
         tmp[sa[0] as usize] = 0;
         for i in 1..n {

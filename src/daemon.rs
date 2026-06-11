@@ -105,10 +105,13 @@ fn pid_is_llmtrim(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        return comm.trim().starts_with("llmtrim");
+        comm.trim().starts_with("llmtrim")
     }
-    #[allow(unreachable_code)]
-    true
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 /// Is a process with this pid alive? `kill -0` on Unix, `tasklist` on Windows — both report
