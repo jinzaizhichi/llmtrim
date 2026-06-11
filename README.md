@@ -233,14 +233,32 @@ Three neighbors solve parts of the same problem - good company to be in. [RTK](h
 | **Live A/B**: savings *and* answer quality | ✅ | offline evals | ❌ | tokens only |
 | Install: one static binary | ✅ | Python + GB models | ✅ | ✅ |
 | **Overhead it adds / request** | **<10 ms** | 52 ms median\* | <10 ms | n/a |
+| Prompt overhead it injects | **19 tokens** | n/a | n/a | 949 tokens (always-on skill) |
 | Deterministic: same request → same result | ✅ | ❌ | ✅ | ✅ |
 
 <sub>\* Headroom's own production telemetry (161 ms mean, 4.2 s P99) - sources in the feature comparison below.</sub>
 
-**They stack.** llmtrim removes another 35% from Claude Code's resent tool schemas *on top of* RTK. On agentic tool output it saves **93–98%**, with the bill measured both ways. (Our A/B of telegraphic output styles found they hurt quality, so Stage F injects a neutral terse instruction instead.)
+**They stack.** llmtrim removes another 35% from Claude Code's resent tool schemas *on top of* RTK. On agentic tool output it saves **93–98%**, with the bill measured both ways.
 
 <details>
-<summary><b>llmtrim vs Headroom: feature by feature</b></summary>
+<summary><b>vs Caveman</b></summary>
+
+Measured on caveman's own 10 benchmark prompts, same model (`gpt-oss-20b`), real API token counts ([bench/results-caveman](bench/results-caveman/README.md)):
+
+| | llmtrim | caveman |
+|---|---|---|
+| Output reduction | −69% | **−80%** (deeper) |
+| Instruction cost | **19 tokens** (`prompts/output_terse.txt`) | 949 tokens (always-on skill, o200k) |
+| Net tokens saved / request | ~728 | ~698 |
+| Quality on 9 prompts | 1 truncation (2048 cap) | 1 hard fail (empty completion) + 1 thinned answer |
+| Beyond output | input + cache + tool schemas | output only |
+
+The caveman persona cuts deeper, but its skill costs 50× the instruction tokens and carried the only hard failure. Net per request the two land within a few percent of each other - llmtrim gets there without the persona risk, quality-gated, and also compresses the input and cache sides caveman doesn't touch. Both arms reproducible: `bench/scripts/caveman_ab.py`.
+
+</details>
+
+<details>
+<summary><b>vs Headroom</b></summary>
 
 The trade is **pure-Rust simplicity + cache-correctness** vs **ML reach**:
 
