@@ -59,9 +59,9 @@ A drop-in HTTPS proxy that compresses every LLM request and reply. **Any provide
 
 Every case is sent twice: the original request and the compressed one. Both answers are scored and priced at real provider rates (`qwen/qwen3-next-80b-a3b-instruct` — a popular cheap instruct model). **Compression doesn't cost quality — pooled answer quality is +3.3pp (95% CI ±5.6, n=112)**: trimming the noise helps the model at least as often as it hurts (hotpotqa +21.5pp, dolly/chat +8.3pp; worst is gsm8k −8.3pp at n=12).
 
-The token cuts underneath are **model-independent** — −31% input, −74% output. The *cost* % rides on the model's output:input price ratio: **−66% here** (≈12:1), **−57% / −59% projected at GPT-4o / Claude Sonnet rates** (`bench/scripts/chart.py` prints these), and −44% on the input-heavy gpt-oss-20b. Reasoning models are the exception — their hidden chain-of-thought is billed as output that prompt-side shaping can't cut, so the cost win shrinks there.
+The token cuts are fixed (−31% input, −74% output); the **cost** % tracks the model's output:input price ratio — −66% here, −44% to −59% on others ([details](bench/README.md)). Reasoning models save less: their hidden thinking is billed as output that prompt-side shaping can't trim.
 
-It holds outside the bench too: dogfooding the proxy on real Claude Code traffic, llmtrim cuts **−68% of the compressible input** (everything outside the provider's cached prefix — measured per-request by the built-in meter, `llmtrim status` shows yours) while **never touching the cached prefix**, so the ~90% prompt-cache discount you already get stays intact.
+And it holds outside the bench: on live Claude Code traffic llmtrim trims **−68% of the compressible input** while never touching the cached prefix, so your ~90% prompt-cache discount stays intact (`llmtrim status` shows yours).
 
 Pooled over 112 cases the win is both ends: input and output. Per-corpus deltas are noisy at n≈12; trust the pooled figure. [Methodology + per-corpus frontier →](bench/README.md)
 
