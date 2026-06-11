@@ -267,12 +267,19 @@ impl OpenRouterModel {
         let config = async_openai::config::OpenAIConfig::new()
             .with_api_base("https://openrouter.ai/api/v1")
             .with_api_key(api_key);
+        // Never route through an HTTP(S)_PROXY: in a `setup`-wired shell that env points at
+        // llmtrim's own interceptor, which would compress the ORIGINAL arm in flight and the
+        // A/B would measure compressed-vs-compressed.
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .context("failed to build the OpenRouter HTTP client")?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("failed to start Tokio runtime for the OpenRouter client")?;
         Ok(Self {
-            client: async_openai::Client::with_config(config),
+            client: async_openai::Client::with_config(config).with_http_client(http_client),
             runtime,
             provider: provider::for_kind(provider),
         })

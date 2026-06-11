@@ -20,6 +20,9 @@ exclude = ["bench/*", "!bench/pricing.json", "tools/", ".github/", ".claude/", "
 [dependencies]
 anyhow = "1.0.102"
 async-openai = { version = "0.41.0", features = ["chat-completion", "byot"], optional = true }
+# Same reqwest async-openai uses — needed to hand it a proxy-free client (quality.rs);
+# TLS/json features come from async-openai's own enables via feature unification.
+reqwest = { version = "0.13", default-features = false, optional = true }
 base64 = "0.22.1"
 bm25 = "2.3.2"
 chrono = "0.4.45"
@@ -94,7 +97,7 @@ default = ["intercept"]
 # Live A/B benchmarking (the `bench` command's network path) pulls in async-openai +
 # tokio. Off by default so library embedders get a tokio-free compression core; the
 # bench scripts build with `--features live`.
-live = ["dep:async-openai", "dep:tokio"]
+live = ["dep:async-openai", "dep:reqwest", "dep:tokio"]
 # The MITM interceptor (`serve`): a man-in-the-middle HTTPS proxy that compresses LLM
 # API requests in flight, modeled on llm-interceptor. Pulls in hudsucker + tokio. Default
 # for the binary; library embedders can opt out with `default-features = false`.
