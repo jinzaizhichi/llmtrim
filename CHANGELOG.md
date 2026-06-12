@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-06-12
+
 ### Added
 - **Range-fold for regular sequences in tool-output template folds**: when a folded
   log's parameter column is a regular sequence — constant values, arithmetic integers,
@@ -197,7 +199,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/fkiene/llmtrim/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/fkiene/llmtrim/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/fkiene/llmtrim/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/fkiene/llmtrim/compare/v0.1.2...v0.1.3
