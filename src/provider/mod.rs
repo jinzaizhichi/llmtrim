@@ -304,8 +304,9 @@ struct Unit<'a> {
     start: usize, // byte offsets into the source
     end: usize,
     list: Option<ListInfo<'a>>,
-    /// Fenced code block (``` or ~~~): atomic — never sentence-split — and
-    /// ranked below every prose/list unit regardless of identifier density.
+    /// Code/example block — fenced (``` or ~~~) or an unfenced indented run —
+    /// atomic (never sentence-split) and ranked below every prose/list unit
+    /// regardless of identifier density.
     fence: bool,
 }
 
@@ -449,8 +450,16 @@ fn separator(last_kept: Option<usize>, i: usize) -> &'static str {
 fn segment_units(s: &str) -> Vec<Unit<'_>> {
     let mut units = Vec::new();
     let mut pos = 0usize;
+    // Base indentation of the description: indented-example detection is
+    // relative to it, so uniformly indented texts are not all "examples".
+    let base = s
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(indent_width)
+        .min()
+        .unwrap_or(0);
     for (start, end) in fence_regions(s) {
-        segment_prose(s, pos, start, &mut units);
+        segment_prose(s, pos, start, base, &mut units);
         units.push(Unit {
             start,
             end,
@@ -459,30 +468,84 @@ fn segment_units(s: &str) -> Vec<Unit<'_>> {
         });
         pos = end;
     }
-    segment_prose(s, pos, s.len(), &mut units);
+    segment_prose(s, pos, s.len(), base, &mut units);
     units
 }
 
-/// Byte ranges of fenced code blocks: a line starting (after indentation)
-/// with three or more ``` ` ``` or `~` opens a fence; the next line starting
-/// with the same fence char closes it. An unclosed fence extends to the end.
+/// Visual indentation width of a line's leading whitespace (tab = 4).
+fn indent_width(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// Index of the last line of an unfenced example block starting at `lines[i]`:
+/// a run of two or more lines indented ≥2 columns beyond `base` (blank lines
+/// tolerated inside) none of which is a compactable list item. `None` when
+/// `lines[i]` does not open such a run.
+fn example_run(lines: &[(usize, &str)], i: usize, base: usize) -> Option<usize> {
+    let deep =
+        |l: &str| !l.trim().is_empty() && indent_width(l) >= base + 2 && item_head(l).is_none();
+    if !deep(lines[i].1) {
+        return None;
+    }
+    let mut last = i;
+    let mut j = i + 1;
+    while j < lines.len() {
+        let l = lines[j].1;
+        if l.trim().is_empty() {
+            j += 1;
+        } else if deep(l) {
+            last = j;
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    (last > i).then_some(last)
+}
+
+/// How an open example region will be closed: a fence line repeating the
+/// same char, or the matching closing tag line.
+enum BlockClose {
+    Fence(char),
+    Tag(String),
+}
+
+/// Byte ranges of delimited example blocks. Two structural delimiters:
+/// a line starting (after indentation) with three or more ``` ` ``` or `~`
+/// opens a fence, closed by the next line starting with the same char; and
+/// a line that is solely an XML-ish tag (`<example>`, `<good-example>`, …)
+/// opens a tag block, closed by the matching `</…>` line. An unclosed
+/// delimiter extends to the end.
 fn fence_regions(s: &str) -> Vec<(usize, usize)> {
     let mut regions = Vec::new();
-    let mut open: Option<(usize, char)> = None;
+    let mut open: Option<(usize, BlockClose)> = None;
     let mut off = 0usize;
     for line in s.split_inclusive('\n') {
-        let t = line.trim_start();
-        if let Some(c) = t.chars().next()
-            && (c == '`' || c == '~')
-            && t.chars().take_while(|&x| x == c).count() >= 3
-        {
-            match open {
-                Some((start, oc)) if oc == c => {
-                    regions.push((start, off + line.len()));
+        let t = line.trim();
+        let fence_char = t
+            .chars()
+            .next()
+            .filter(|&c| (c == '`' || c == '~') && t.chars().take_while(|&x| x == c).count() >= 3);
+        match &open {
+            Some((start, close)) => {
+                let closed = match close {
+                    BlockClose::Fence(c) => fence_char == Some(*c),
+                    BlockClose::Tag(name) => t == format!("</{name}>"),
+                };
+                if closed {
+                    regions.push((*start, off + line.len()));
                     open = None;
                 }
-                Some(_) => {}
-                None => open = Some((off, c)),
+            }
+            None => {
+                if let Some(c) = fence_char {
+                    open = Some((off, BlockClose::Fence(c)));
+                } else if let Some(name) = lone_open_tag(t) {
+                    open = Some((off, BlockClose::Tag(name.to_string())));
+                }
             }
         }
         off += line.len();
@@ -493,9 +556,20 @@ fn fence_regions(s: &str) -> Vec<(usize, usize)> {
     regions
 }
 
+/// Tag name when the trimmed line is exactly an opening tag `<name>` made of
+/// identifier chars (letters, digits, `-`, `_`). `None` otherwise.
+fn lone_open_tag(t: &str) -> Option<&str> {
+    let name = t.strip_prefix('<')?.strip_suffix('>')?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'))
+    .then_some(name)
+}
+
 /// Segment `s[start..end]` (a fence-free span) into list blocks interleaved
 /// with sentence spans.
-fn segment_prose<'a>(s: &'a str, start: usize, end: usize, units: &mut Vec<Unit<'a>>) {
+fn segment_prose<'a>(s: &'a str, start: usize, end: usize, base: usize, units: &mut Vec<Unit<'a>>) {
     let mut lines: Vec<(usize, &str)> = Vec::new();
     let mut off = start;
     for l in s[start..end].split_inclusive('\n') {
@@ -517,6 +591,21 @@ fn segment_prose<'a>(s: &'a str, start: usize, end: usize, units: &mut Vec<Unit<
         {
             let rel = last_sentence_offset(lines[i].1);
             (Some(lines[i].1[rel..].trim()), rel, i + 1)
+        } else if let Some(last) = example_run(&lines, i, base) {
+            // Unfenced example block: indented code/sample lines are one
+            // atomic, lowest-tier unit — same treatment as a fence.
+            let block_start = lines[i].0;
+            let block_end = lines[last].0 + lines[last].1.len();
+            push_sentences(s, plain_start, block_start, units);
+            units.push(Unit {
+                start: block_start,
+                end: block_end,
+                list: None,
+                fence: true,
+            });
+            plain_start = block_end;
+            i = last + 1;
+            continue;
         } else {
             i += 1;
             continue;
@@ -533,7 +622,17 @@ fn segment_prose<'a>(s: &'a str, start: usize, end: usize, units: &mut Vec<Unit<
             if !heads.contains(&h) {
                 heads.push(h);
             }
+            let item_indent = indent_width(lines[j].1);
             j += 1;
+            // Deeper-indented non-item lines after a bullet are the item's
+            // body (continuations) — never independent units.
+            while j < lines.len()
+                && !lines[j].1.trim().is_empty()
+                && indent_width(lines[j].1) > item_indent
+                && item_head(lines[j].1).is_none()
+            {
+                j += 1;
+            }
         }
         if items < 2 {
             // A lone marker line is ordinary text, not a list.
@@ -996,6 +1095,102 @@ mod tests {
         assert!(out.contains("`apply_patch`"), "{out}");
         assert!(!out.contains("Co-Authored-By"), "{out}");
         assert!(!out.contains("git commit"), "{out}");
+    }
+
+    #[test]
+    fn unfenced_indented_example_loses_to_constraint_prose() {
+        // Same shape as the fenced case but with no fences at all: the code
+        // example is only signalled by indentation. It must stay atomic and
+        // lowest-tier — no fragment may win the budget over constraints.
+        let mut input = String::from(
+            "Runs project workflows and reports their status. \
+             You must pass `workflow_id` and `timeout_ms`; paths are resolved \
+             relative to the repo root.\n\nExample:\n",
+        );
+        for i in 0..20 {
+            input.push_str(&format!(
+                "  const flaky_{i} = await runWorkflow({{ name: 'find-flaky-tests' }})\n    \
+                 log(`${{bugs.length}}/10 found`)\n"
+            ));
+        }
+        let out = trunc(&input, 200);
+        assert!(out.contains("`workflow_id`"), "{out}");
+        assert!(!out.contains("find-flaky-tests"), "{out}");
+        assert!(!out.contains("bugs.length"), "{out}");
+    }
+
+    #[test]
+    fn real_workflow_description_drops_indented_js() {
+        let input = include_str!("../../tests/fixtures/tool_desc_workflow.txt");
+        let out = trunc(input, 300);
+        assert!(
+            out.starts_with(
+                "Execute a workflow script that orchestrates multiple subagents deterministically."
+            ),
+            "{out}"
+        );
+        for frag in ["bugs.length", "find-flaky-tests", "log(`"] {
+            assert!(!out.contains(frag), "{frag} leaked: {out}");
+        }
+        // At least one behavioral constraint sentence beyond the identity.
+        assert!(
+            out.contains("Required fields: `name`, `description`."),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn real_bash_description_drops_commit_boilerplate() {
+        let input = include_str!("../../tests/fixtures/tool_desc_bash.txt");
+        let out = trunc(input, 300);
+        assert!(
+            out.starts_with("Executes a given bash command and returns its output."),
+            "{out}"
+        );
+        for frag in ["Co-Authored-By", "Generated with"] {
+            assert!(!out.contains(frag), "{frag} leaked: {out}");
+        }
+        // Retains at least one behavioral constraint sentence.
+        assert!(out.chars().filter(|c| *c == '.').count() >= 2, "{out}");
+    }
+
+    #[test]
+    fn indented_bullet_list_still_compacts() {
+        // The list-compaction tier must keep claiming indented bullet runs
+        // with identifier-shaped heads — they are catalogs, not examples.
+        let mut input = String::from("Launch a new agent for the task. Available agent types:\n");
+        for h in [
+            "general-purpose",
+            "code-reviewer",
+            "test-runner",
+            "doc-writer",
+        ] {
+            input.push_str(&format!(
+                "  - {h}: use this agent whenever the task requires that \
+                 speciality, with a deliberately long body so the whole block \
+                 cannot fit in the leftover budget at all\n"
+            ));
+        }
+        let out = trunc(&input, 140);
+        assert!(out.contains("Available agent types:"), "{out}");
+        assert!(out.contains("general-purpose"), "{out}");
+        assert!(out.contains("code-reviewer"), "{out}");
+        assert!(!out.contains("use this agent whenever"), "{out}");
+    }
+
+    #[test]
+    fn list_item_continuation_lines_stay_in_body() {
+        // Deeper-indented non-bullet lines after a bullet belong to the item
+        // body: they must never surface as independent high-scoring units.
+        let input = "Tool identity sentence here. Always verify paths before writing.\n\
+            Steps:\n\
+            - commit-step: create the commit ending with:\n   \
+            Co-Authored-By: Bot <bot@example.com>\n   \
+            🤖 Generated with [Tool](https://example.com)\n\
+            - verify-step: run status to confirm success\n";
+        let out = trunc(input, 110);
+        assert!(!out.contains("Co-Authored-By"), "{out}");
+        assert!(!out.contains("Generated with"), "{out}");
     }
 
     #[test]
