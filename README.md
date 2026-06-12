@@ -82,6 +82,42 @@ Each stage fires only where it pays, and only if the token gate nets a win:
 </p>
 
 <details>
+<summary><b>Full before / after: one tool result</b></summary>
+
+A real run of `llmtrim compress` on a whole Anthropic `messages` request (5,210 chars in, 1,506 out). Two stages fired: cache discipline added a `cache_control` marker to the tool block so it stays cached across calls, and tool-output compression - shown below, where the bulk of the saving came from - folded a cargo build log the `bash` tool returned: 58 lines, 4,662 chars, two ERROR lines buried in 56 INFO lines.
+
+**Before** - the `tool_result` content as the model would have received it (abridged for this page; the actual input is the full 58 lines / 4,662 chars):
+
+```text
+[2026-06-13T10:02:00Z] INFO  compiling module core::worker::task_0 (incremental)
+[2026-06-13T10:02:01Z] INFO  compiling module core::worker::task_1 (incremental)
+[2026-06-13T10:02:02Z] INFO  compiling module core::worker::task_2 (incremental)
+[2026-06-13T10:02:03Z] INFO  compiling module core::worker::task_3 (incremental)
+[2026-06-13T10:02:04Z] INFO  compiling module core::worker::task_4 (incremental)
+[2026-06-13T10:02:05Z] INFO  compiling module core::worker::task_5 (incremental)
+... 24 more INFO lines ...
+[2026-06-13T10:02:31Z] ERROR src/worker/pool.rs:214: mismatched types: expected `usize`, found `i64`
+... 24 more INFO lines ...
+[2026-06-13T10:02:36Z] INFO  compiling module core::net::conn_24 (incremental)
+[2026-06-13T10:03:01Z] ERROR src/net/conn.rs:88: cannot borrow `buf` as mutable more than once
+[2026-06-13T10:03:02Z] INFO  build failed, 2 errors
+```
+
+**After** - the same `tool_result` as llmtrim sends it, in full (5 lines, 978 chars):
+
+```text
+[{}] INFO compiling module core::worker::task_{} (incremental) [×30: (2026-06-13T10:02:00Z..2026-06-13T10:02:29Z step 1s; 0..29)]
+[2026-06-13T10:02:31Z] ERROR src/worker/pool.rs:214: mismatched types: expected `usize`, found `i64`
+[{}] INFO compiling module core::net::conn_{} (incremental) [×25: (2026-06-13T10:02:32Z,2026-06-13T10:02:33Z,2026-06-13T10:02:34Z,2026-06-13T10:02:35Z,2026-06-13T10:02:36Z,2026-06-13T10:02:37Z,2026-06-13T10:02:38Z,2026-06-13T10:02:39Z,2026-06-13T10:02:40Z,2026-06-13T10:02:41Z,2026-06-13T10:02:42Z,2026-06-13T10:02:43Z,2026-06-13T10:02:44Z,2026-06-13T10:02:45Z,2026-06-13T10:02:46Z,2026-06-13T10:02:47Z,2026-06-13T10:02:48Z,2026-06-13T10:02:49Z,2026-06-13T10:02:50Z,2026-06-13T10:02:51Z,2026-06-13T10:02:32Z,2026-06-13T10:02:33Z,2026-06-13T10:02:34Z,2026-06-13T10:02:35Z,2026-06-13T10:02:36Z; 0..24)]
+[2026-06-13T10:03:01Z] ERROR src/net/conn.rs:88: cannot borrow `buf` as mutable more than once
+[2026-06-13T10:03:02Z] INFO  build failed, 2 errors
+```
+
+Both ERROR lines and the summary survive verbatim. The 55 repetitive INFO lines are folded into a template plus their parameter columns - regular sequences collapse to a lossless range (`00Z..29Z step 1s; 0..29`), and when a column is irregular (the second block's timestamps wrap) it stays an explicit list rather than risk a lossy guess. The other stages fire on shapes this small request doesn't have (long prose, big JSON, code, images); the table below shows what each does. Reproduce on your own data with one command: `llmtrim compress --provider anthropic < request.json`.
+
+</details>
+
+<details>
 <summary><b>Full stage reference</b></summary>
 
 Stages run in savings order: `tool-output > retrieve > cache > output > json-sample > serialization > skeleton > dedup > micro-text`. Nothing under a `cache_control` marker is ever rewritten.
