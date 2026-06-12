@@ -5,6 +5,10 @@ on:
     branches: [main, master]
   pull_request:
 
+# Least privilege: every job only reads the repo; none of them write anything back.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
