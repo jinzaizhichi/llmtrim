@@ -12,3 +12,21 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 echo "pre-push: cargo test"
 cargo test --quiet
+
+# Formula syntax check — a lowercase class name breaks `brew install` (see f-class fix).
+if ! git diff --quiet @{push} -- Formula/ 2>/dev/null || ! git rev-parse --quiet --verify @{push} >/dev/null 2>&1; then
+    if command -v ruby >/dev/null 2>&1; then
+        echo "pre-push: ruby -c Formula/*.rb"
+        for f in Formula/*.rb; do ruby -c "$f" >/dev/null; done
+    fi
+fi
+
+# Secret scan over full history — last line of defense before anything lands on the public repo.
+echo "pre-push: gitleaks"
+if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks detect --source . --redact --no-banner
+elif command -v docker >/dev/null 2>&1; then
+    docker run --rm -v "$(pwd)":/repo zricethezav/gitleaks:latest detect --source /repo --redact --no-banner
+else
+    echo "pre-push: WARNING: gitleaks not available (no gitleaks binary, no docker) — secrets NOT scanned" >&2
+fi
