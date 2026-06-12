@@ -48,10 +48,12 @@ brew install --build-from-source ./Formula/llmtrim.rb
 ## With npm
 
 ```bash
-npm install -g llmtrim    # prebuilt binary for your platform (no Rust needed)
-# or one-shot, no install:
-npx llmtrim setup
+npm install -g llmtrim && llmtrim setup   # prebuilt binary for your platform (no Rust needed)
 ```
+
+`npx llmtrim compress < req.json` works for trying it without installing — but use the
+global install for `setup`: the daemon and autostart need a binary that survives
+`npm cache clean`, which the npx cache does not.
 
 ## With Cargo
 

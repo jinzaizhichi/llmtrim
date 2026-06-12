@@ -27,6 +27,7 @@ enum Channel {
     Binary,
     Cargo,
     Homebrew,
+    Npm,
 }
 
 /// Where this binary was installed from — determines how to update it.
@@ -34,7 +35,10 @@ fn channel() -> Channel {
     let p = std::env::current_exe()
         .map(|e| e.to_string_lossy().into_owned())
         .unwrap_or_default();
-    if p.contains("/.cargo/") || p.contains("\\.cargo\\") {
+    if p.contains("node_modules") || p.contains("/_npx/") || p.contains("\\_npx\\") {
+        // npm global install or an npx cache — npm owns this binary, never the installer.
+        Channel::Npm
+    } else if p.contains("/.cargo/") || p.contains("\\.cargo\\") {
         Channel::Cargo
     } else if p.contains("/Cellar/") || p.contains("/homebrew/") || p.contains("/linuxbrew/") {
         Channel::Homebrew
@@ -179,6 +183,13 @@ pub fn run() -> Result<()> {
             "update via Homebrew",
             &[
                 "brew upgrade llmtrim",
+                "llmtrim setup    # restart the daemon on the new binary",
+            ],
+        ),
+        Channel::Npm => instructions(
+            "update via npm",
+            &[
+                "npm update -g llmtrim",
                 "llmtrim setup    # restart the daemon on the new binary",
             ],
         ),

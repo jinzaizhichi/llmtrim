@@ -108,8 +108,8 @@ Default `auto` switches each stage on only where it pays. `safe` runs the lossle
 > **Is this safe?** Everything runs locally - nothing is ever sent to us. llmtrim sees your LLM traffic only; every other connection passes through untouched. `setup` changes three things (a certificate in `~/.llmtrim/`, a proxy block in your shell profile, a background service) and `llmtrim uninstall` removes all three. Anything that can't be compressed safely is sent through unmodified. Full threat model: [SECURITY.md](SECURITY.md).
 
 ```bash
-# 1 - Install (Linux / macOS; runs `setup` for you)
-curl -fsSL https://raw.githubusercontent.com/fkiene/llmtrim/main/install.sh | sh
+# 1 - Install (any OS, prebuilt binary, no Rust needed)
+npm install -g llmtrim && llmtrim setup
 
 # 2 - Open a new shell. Your tools now route through llmtrim.
 
@@ -117,12 +117,9 @@ curl -fsSL https://raw.githubusercontent.com/fkiene/llmtrim/main/install.sh | sh
 llmtrim status --watch
 ```
 
-```powershell
-# Windows (PowerShell) - prebuilt, installs and runs setup
-irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
-```
+No Node? Same result with the installers: `curl -fsSL https://raw.githubusercontent.com/fkiene/llmtrim/main/install.sh | sh` (Linux/macOS) or `irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex` (Windows PowerShell).
 
-Prefer your own package manager? `npx llmtrim setup`, `brew install fkiene/tap/llmtrim`, `cargo binstall llmtrim`, `scoop install llmtrim` (after `scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket`), or `docker run ghcr.io/fkiene/llmtrim` - same binary everywhere. Prebuilt for x64 and ARM64; WSL uses the Linux line. Full options in [INSTALL.md](INSTALL.md).
+Prefer your own package manager? `brew install fkiene/tap/llmtrim`, `cargo binstall llmtrim`, `scoop install llmtrim` (after `scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket`), or `docker run ghcr.io/fkiene/llmtrim` - same binary everywhere. Prebuilt for x64 and ARM64; WSL uses the Linux line. Full options in [INSTALL.md](INSTALL.md).
 
 <p align="center">
   <picture>
