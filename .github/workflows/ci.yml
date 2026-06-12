@@ -53,6 +53,28 @@ jobs:
         with:
           command: check licenses sources
 
+  # Enforced secret scan — the local hooks are opt-in and bypassable (--no-verify);
+  # this job catches everyone. fetch-depth: 0 so a secret buried in an earlier commit
+  # of a PR branch still fails, not just the tip.
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Homebrew formula must stay valid Ruby (a lowercase class name once broke `brew install`).
+  formula:
+    name: Formula syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: for f in Formula/*.rb; do ruby -c "$f"; done
+
   # Guard the advertised MSRV (`rust-version` in Cargo.toml). Stable-only CI can silently
   # adopt a newer-than-1.88 API; this job fails when that happens.
   msrv:

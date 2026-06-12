@@ -25,6 +25,12 @@ cargo build --features live  # the bench network path (async-openai + tokio)
 
 CI runs fmt, clippy (`-D warnings`), and the test suite on Linux, macOS, and Windows. Keep all three green.
 
+Enable the local git hooks (mirror of CI plus a gitleaks secret scan; needs `gitleaks` or Docker):
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Adding a compression stage
 
 Stages implement the `Transform` trait (`src/gate.rs`) and are assembled in
