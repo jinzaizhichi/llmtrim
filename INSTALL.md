@@ -45,11 +45,38 @@ brew install fkiene/tap/llmtrim
 brew install --build-from-source ./Formula/llmtrim.rb
 ```
 
+## With npm
+
+```bash
+npm install -g llmtrim    # prebuilt binary for your platform (no Rust needed)
+# or one-shot, no install:
+npx llmtrim setup
+```
+
 ## With Cargo
 
 ```bash
-cargo install --locked llmtrim
+cargo binstall llmtrim     # prebuilt binary (needs cargo-binstall; seconds)
+cargo install --locked llmtrim   # or compile from crates.io
 ```
+
+## Scoop (Windows)
+
+```powershell
+scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket
+scoop install llmtrim
+```
+
+## Docker
+
+For containers and CI — runs the proxy with the state on a volume:
+
+```bash
+docker run -d -p 43117:43117 -v llmtrim-state:/data ghcr.io/fkiene/llmtrim
+```
+
+The image binds `0.0.0.0` inside the container (set `LLMTRIM_BIND` to change); point your
+tools at it with `HTTPS_PROXY=http://localhost:43117` and trust the CA from the volume.
 
 ## From source
 

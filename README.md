@@ -122,7 +122,7 @@ llmtrim status --watch
 irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
 ```
 
-Prefer to read what you run? `cargo install --locked llmtrim` or `brew install fkiene/tap/llmtrim` - same `setup`, no script. Prebuilt for x64 and ARM64; WSL uses the Linux line. Full options in [INSTALL.md](INSTALL.md).
+Prefer your own package manager? `npx llmtrim setup`, `brew install fkiene/tap/llmtrim`, `cargo binstall llmtrim`, `scoop install llmtrim` (after `scoop bucket add llmtrim https://github.com/fkiene/scoop-bucket`), or `docker run ghcr.io/fkiene/llmtrim` - same binary everywhere. Prebuilt for x64 and ARM64; WSL uses the Linux line. Full options in [INSTALL.md](INSTALL.md).
 
 <p align="center">
   <picture>
