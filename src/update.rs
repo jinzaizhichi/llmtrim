@@ -32,9 +32,14 @@ enum Channel {
 
 /// Where this binary was installed from — determines how to update it.
 fn channel() -> Channel {
-    let p = std::env::current_exe()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    channel_of(
+        &std::env::current_exe()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    )
+}
+
+fn channel_of(p: &str) -> Channel {
     if p.contains("node_modules") || p.contains("/_npx/") || p.contains("\\_npx\\") {
         // npm global install or an npx cache — npm owns this binary, never the installer.
         Channel::Npm
@@ -242,6 +247,49 @@ pub fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_detection_by_path() {
+        assert!(matches!(
+            channel_of("/home/u/.cargo/bin/llmtrim"),
+            Channel::Cargo
+        ));
+        assert!(matches!(
+            channel_of("C:\\Users\\u\\.cargo\\bin\\llmtrim.exe"),
+            Channel::Cargo
+        ));
+        assert!(matches!(
+            channel_of("/opt/homebrew/Cellar/llmtrim/0.1.1/bin/llmtrim"),
+            Channel::Homebrew
+        ));
+        assert!(matches!(
+            channel_of("/home/linuxbrew/.linuxbrew/bin/llmtrim"),
+            Channel::Homebrew
+        ));
+        assert!(matches!(
+            channel_of("/usr/lib/node_modules/llmtrim-linux-x64/bin/llmtrim"),
+            Channel::Npm
+        ));
+        assert!(matches!(
+            channel_of("/home/u/.npm/_npx/abc123/node_modules/.bin/llmtrim"),
+            Channel::Npm
+        ));
+        assert!(matches!(
+            channel_of("C:\\Users\\u\\AppData\\npm-cache\\_npx\\x\\llmtrim.exe"),
+            Channel::Npm
+        ));
+        assert!(matches!(
+            channel_of("/home/u/.local/bin/llmtrim"),
+            Channel::Binary
+        ));
+        assert!(matches!(
+            channel_of("C:\\Users\\u\\AppData\\Local\\llmtrim\\bin\\llmtrim.exe"),
+            Channel::Binary
+        ));
+        assert!(matches!(channel_of(""), Channel::Binary));
+    }
+
     use super::*;
 
     #[test]

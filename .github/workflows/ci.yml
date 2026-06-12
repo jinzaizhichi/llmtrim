@@ -3,7 +3,17 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # Docs/assets don't affect the build — skip the whole matrix. Secrets in these files
+    # are still covered by the pre-commit/pre-push gitleaks hooks and GitHub push protection.
+    paths-ignore: ["**.md", "**.svg", "LICENSE", ".gitignore", ".gitattributes"]
   pull_request:
+    paths-ignore: ["**.md", "**.svg", "LICENSE", ".gitignore", ".gitattributes"]
+
+# Rapid pushes stack runs that all execute to completion — cancel the superseded one.
+# Tag/release runs are unaffected (separate workflow, no shared group).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 # Least privilege: every job only reads the repo; none of them write anything back.
 permissions:
