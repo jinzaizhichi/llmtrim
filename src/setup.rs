@@ -976,8 +976,7 @@ fn schedule_removal_script(attempt: &str) {
     use std::process::Stdio;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let script =
-        format!("for /l %i in (1,1,30) do (ping 127.0.0.1 -n 3 >nul & {attempt})");
+    let script = format!("for /l %i in (1,1,30) do (ping 127.0.0.1 -n 3 >nul & {attempt})");
     let _ = std::process::Command::new("cmd")
         .args(["/c", &script])
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
