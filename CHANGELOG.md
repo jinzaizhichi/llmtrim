@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`uninstall` no longer deletes package-manager-owned binaries**: under an npm /
+  cargo / Homebrew install it keeps the file and prints the manager's uninstall command
+  (deleting it out from under the manager left broken bookkeeping). INSTALL.md documents
+  the order: `llmtrim uninstall` first, then the package manager.
+- npm packages now ship a README (npmjs renders the tarball readme, not the repo's).
+
 ## [0.1.4] - 2026-06-12
 
 ### Fixed

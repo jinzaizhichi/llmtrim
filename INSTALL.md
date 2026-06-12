@@ -141,3 +141,9 @@ llmtrim uninstall            # stop daemon, disable autostart, strip env block, 
 llmtrim uninstall --purge    # also delete the savings ledger
 llmtrim uninstall --keep-binary
 ```
+
+Installed via a package manager? Run `llmtrim uninstall` **first** (it undoes `setup`;
+removing the package alone leaves `HTTPS_PROXY` pointing at a dead proxy and breaks your
+LLM tools), then remove the binary with your manager — `uninstall` detects the channel
+and prints the exact command (`npm uninstall -g @llmtrim/cli` / `cargo uninstall llmtrim` /
+`brew uninstall llmtrim`).

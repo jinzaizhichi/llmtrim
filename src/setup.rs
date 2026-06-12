@@ -539,8 +539,22 @@ pub fn uninstall(purge: bool, keep_binary: bool) -> Result<()> {
     }
 
     // 6. The binary itself (Unix can unlink a running executable; Windows can't).
+    // Package-manager-owned binaries are NOT deleted: removing the file out from under
+    // npm/cargo/brew leaves their bookkeeping broken — print their command instead.
+    let manager_cmd = match crate::update::channel() {
+        crate::update::Channel::Npm => Some("npm uninstall -g @llmtrim/cli"),
+        crate::update::Channel::Cargo => Some("cargo uninstall llmtrim"),
+        crate::update::Channel::Homebrew => Some("brew uninstall llmtrim"),
+        crate::update::Channel::Binary => None,
+    };
     if keep_binary {
         rows.push((ui::NOTE, "Binary".into(), "kept".into()));
+    } else if let Some(cmd) = manager_cmd {
+        rows.push((
+            ui::NOTE,
+            "Binary".into(),
+            format!("owned by your package manager — finish with: {cmd}"),
+        ));
     } else if let Ok(exe) = std::env::current_exe() {
         #[cfg(unix)]
         {

@@ -23,7 +23,7 @@ fn repo() -> &'static str {
 }
 
 #[derive(PartialEq, Eq)]
-enum Channel {
+pub(crate) enum Channel {
     Binary,
     Cargo,
     Homebrew,
@@ -31,7 +31,7 @@ enum Channel {
 }
 
 /// Where this binary was installed from — determines how to update it.
-fn channel() -> Channel {
+pub(crate) fn channel() -> Channel {
     channel_of(
         &std::env::current_exe()
             .map(|e| e.to_string_lossy().into_owned())
