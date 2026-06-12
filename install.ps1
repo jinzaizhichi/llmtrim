@@ -82,7 +82,11 @@ function Install-Prebuilt($target) {
     # Verify SHA-256 checksum against the .sha256 sidecar uploaded by CI.
     $sha256Url = ($url -replace '\.zip$', '.sha256')
     try {
-        $expectedLine = (Invoke-WebRequest $sha256Url -UseBasicParsing).Content.Trim()
+        # GitHub serves the sidecar as octet-stream, making .Content a byte[] — download
+        # to a file instead of touching .Content.
+        $shaFile = "$zip.sha256"
+        Invoke-WebRequest $sha256Url -OutFile $shaFile -UseBasicParsing
+        $expectedLine = (Get-Content $shaFile -Raw).Trim()
         $expectedHash = ($expectedLine -split '\s+')[0].ToUpper()
         $actualHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToUpper()
         if ($actualHash -ne $expectedHash) {
@@ -92,7 +96,7 @@ function Install-Prebuilt($target) {
         }
         Info "Checksum verified."
     } catch {
-        Write-Error "Failed to fetch or verify checksum from $sha256Url"
+        Write-Error "Failed to fetch or verify checksum from ${sha256Url}: $_"
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
         exit 1
     }
