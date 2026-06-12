@@ -24,10 +24,12 @@
 //!    header naming llmtrim and the recovery action, so an agent never misattributes
 //!    the elision to the tool (or to whatever wrapper ran it).
 //! 2. **Repeat → passthrough** ([`ToolOutputStage::apply`]): when a candidate's content
-//!    already appears verbatim earlier in the request — the agent re-ran the tool to
-//!    get the dropped detail back — the newest occurrence ships in full. This is what
-//!    makes the header's "re-run the tool" promise true: compression is deterministic,
-//!    so without this rail a retry would be windowed identically and the agent would
+//!    already appears earlier in the request — the agent re-ran the tool to get the
+//!    dropped detail back — the newest occurrence ships in full. Equality is on a
+//!    volatile-value-masked fingerprint ([`template::fingerprint`]), since re-runs are
+//!    rarely byte-identical (timings, timestamps, PIDs). This is what makes the
+//!    header's "re-run the tool" promise true: compression is deterministic, so
+//!    without this rail a retry would be windowed identically and the agent would
 //!    conclude the tool itself is broken.
 //! 3. **Never inflate** ([`elide_into`]): an elision marker is emitted only when it is
 //!    shorter than the lines it hides; a lone `--` separator survives as itself.
@@ -199,22 +201,26 @@ impl Transform for ToolOutputStage {
             mode: self.mode,
         };
 
-        // Rail: repeat → passthrough. A candidate whose raw text already appears at an
-        // earlier content pointer is a re-invocation returning identical output — the
+        // Rail: repeat → passthrough. A candidate whose content already appears at an
+        // earlier content pointer is a re-invocation returning the same output — the
         // agent asking for the windowed detail back (the elision header tells it to).
-        // Ship the newest occurrence in full. Raw-text equality is provider-neutral and
-        // language-free: deterministic tools (grep, file reads, ls) repeat verbatim;
-        // non-deterministic output (timestamps) simply never triggers the rail.
+        // Ship the newest occurrence in full. Equality is on the volatile-value-masked
+        // [`template::fingerprint`], not raw text: most re-runs are *not* byte-identical
+        // (test timings like TAP's `duration_ms`, log timestamps, ports, PIDs), and raw
+        // equality would re-window exactly the retry the header promised would work.
+        // Masking is provider-neutral and language-free; a masked false match merely
+        // ships one output uncompressed.
         let repeats: HashSet<String> = {
             let candidates: HashSet<&str> = pointers.iter().map(String::as_str).collect();
-            let mut earlier: HashSet<&str> = HashSet::new();
+            let mut earlier: HashSet<u64> = HashSet::new();
             let mut repeats = HashSet::new();
             for p in provider.content_text_pointers(req) {
                 let Some(t) = req.get_str(&p) else { continue };
-                if candidates.contains(p.as_str()) && earlier.contains(t) {
+                let fp = template::fingerprint(t);
+                if candidates.contains(p.as_str()) && earlier.contains(&fp) {
                     repeats.insert(p);
                 } else {
-                    earlier.insert(t);
+                    earlier.insert(fp);
                 }
             }
             repeats

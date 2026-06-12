@@ -22,6 +22,28 @@
 //! Variable tokens are locale-independent (numbers, hex/UUID, ISO-8601 timestamps,
 //! IPv4, quoted strings), so masking is language-agnostic.
 //!
+//! # Range-folded parameter columns
+//!
+//! When a captured parameter *column* is a regular sequence, listing every tuple is pure
+//! waste, so a post-pass on the fold ([`render_tuple_block`]) may swap the row-wise tuples
+//! for one column-wise group — `[×N: (col0; col1; …)]`, columns `; `-separated, each one of:
+//!
+//! - a single value — the column is constant across all N rows;
+//! - `start..end` (integers, step 1) or `start..end step k` — an arithmetic sequence,
+//!   inclusive of `end`, N values exactly;
+//! - `start..end step Ns` — ISO-8601-like timestamps with a constant step of N seconds;
+//! - an explicit `,`-joined value list — anything irregular (per-column fallback).
+//!
+//! Example: `[×30: (2026-06-13T10:02:00Z..2026-06-13T10:02:29Z step 1s; 0..29)]`.
+//!
+//! Columns are independent: one may range-fold while another stays explicit. The fold is
+//! LOSSLESS by construction — a candidate range is emitted only after every original value
+//! round-trips byte-identically through the notation (canonical decimal rendering for
+//! integers; epoch-seconds re-render for timestamps), so mixed widths, leading zeros,
+//! irregular steps, fractional seconds or odd calendar shapes all fall back to the explicit
+//! list. And it never inflates: the column form is used only when strictly shorter than the
+//! row-wise tuples.
+//!
 //! # Global (non-adjacent) pass — [`collapse_global`]
 //!
 //! The consecutive pass above misses *interleaved* repeats: parallel build output
@@ -197,13 +219,254 @@ fn push_collapsed(out: &mut String, s: &str) {
 }
 
 /// Render `<template> [×N: (tuple0) (tuple1) …]`, one comma-joined tuple of variable
-/// values per original line, positional against the `{}` slots.
+/// values per original line, positional against the `{}` slots — or the column-wise
+/// range form when that's strictly shorter (see [`render_tuple_block`]).
 fn render_run(tpl: &str, run: &[&str]) -> String {
-    let tuples: Vec<String> = run
+    let rows: Vec<Vec<String>> = run.iter().map(|l| template_of(l).1).collect();
+    format!("{tpl} [×{}: {}]", run.len(), render_tuple_block(&rows))
+}
+
+/// The inner `[×N: …]` payload for a folded group: row-wise tuples by default, swapped for
+/// the column-wise range form (module docs, "Range-folded parameter columns") only when at
+/// least one column folds **and** the result is strictly shorter — never inflates, and the
+/// irregular case is byte-identical to today's output.
+fn render_tuple_block(rows: &[Vec<String>]) -> String {
+    let row_wise = rows
         .iter()
-        .map(|l| format!("({})", template_of(l).1.join(",")))
+        .map(|r| format!("({})", r.join(",")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match render_columns(rows) {
+        Some(col_wise) if col_wise.len() < row_wise.len() => col_wise,
+        _ => row_wise,
+    }
+}
+
+/// Column-wise `(col0; col1; …)` rendering, or `None` when it doesn't apply: ragged rows
+/// (defensive), no column folds, or any value contains the notation's own separators
+/// (`,`, `;`, `..` — quoted-string captures can), which would make reconstruction
+/// ambiguous. Lossless: a fold is per-column and only via [`fold_column`]'s round-trip
+/// checks; irregular columns stay an explicit comma list. A datetime-ish column that
+/// falls back is reported to the missed-fold telemetry ([`record_missed_fold`]) so real
+/// traffic can rank which shapes the future registry should support.
+fn render_columns(rows: &[Vec<String>]) -> Option<String> {
+    let width = rows.first()?.len();
+    if width == 0 || rows.iter().any(|r| r.len() != width) {
+        return None;
+    }
+    if rows
+        .iter()
+        .flatten()
+        .any(|v| v.contains(',') || v.contains(';') || v.contains(".."))
+    {
+        return None;
+    }
+    let mut any_folded = false;
+    let cols: Vec<String> = (0..width)
+        .map(|c| {
+            let vals: Vec<&str> = rows.iter().map(|r| r[c].as_str()).collect();
+            match fold_column(&vals) {
+                Some(folded) => {
+                    any_folded = true;
+                    folded
+                }
+                None => {
+                    record_missed_fold(&vals);
+                    vals.join(",")
+                }
+            }
+        })
         .collect();
-    format!("{tpl} [×{}: {}]", run.len(), tuples.join(" "))
+    if !any_folded {
+        return None;
+    }
+    Some(format!("({})", cols.join("; ")))
+}
+
+/// Fold one parameter column into range notation, or `None` (→ explicit list). Constant
+/// first (the single value), then arithmetic integers, then constant-step timestamps.
+fn fold_column(vals: &[&str]) -> Option<String> {
+    let first = vals.first()?;
+    if vals.iter().all(|v| v == first) {
+        return Some((*first).to_string());
+    }
+    fold_int_column(vals).or_else(|| fold_timestamp_column(vals))
+}
+
+/// `start..end` (`step k` when k ≠ 1) for an arithmetic integer sequence. Lossless gate:
+/// every value must be its own canonical decimal rendering (parse → to_string round-trip),
+/// so leading zeros / mixed widths / signs fall back to the explicit list.
+fn fold_int_column(vals: &[&str]) -> Option<String> {
+    let nums: Vec<i128> = vals
+        .iter()
+        .map(|v| v.parse::<i128>().ok().filter(|n| n.to_string() == **v))
+        .collect::<Option<_>>()?;
+    let step = nums.get(1)? - nums[0];
+    if step == 0 || nums.windows(2).any(|w| w[1] - w[0] != step) {
+        return None;
+    }
+    let (start, end) = (vals[0], vals[vals.len() - 1]);
+    Some(if step == 1 {
+        format!("{start}..{end}")
+    } else {
+        format!("{start}..{end} step {step}")
+    })
+}
+
+/// `start..end step Ns` for ISO-8601-like timestamps (the shape [`VARIABLE`] already
+/// captures, sans fractional seconds) with a constant whole-second step. All values must
+/// share the date/time separator and zone suffix, and every one must re-render
+/// byte-identically from its epoch seconds — leap-second or invalid-calendar shapes fail
+/// that round-trip and fall back to the explicit list.
+fn fold_timestamp_column(vals: &[&str]) -> Option<String> {
+    let ts: Vec<Ts> = vals.iter().map(|v| parse_ts(v)).collect::<Option<_>>()?;
+    let head = &ts[0];
+    if ts
+        .iter()
+        .any(|t| t.sep != head.sep || t.suffix != head.suffix)
+    {
+        return None;
+    }
+    let step = ts.get(1)?.epoch - head.epoch;
+    if step == 0 || ts.windows(2).any(|w| w[1].epoch - w[0].epoch != step) {
+        return None;
+    }
+    // Round-trip every original: byte equality ⇒ start-epoch + i·step reconstructs exactly.
+    let (sep, suffix) = (head.sep, head.suffix.as_str());
+    if ts
+        .iter()
+        .zip(vals)
+        .any(|(t, v)| render_ts(t.epoch, sep, suffix) != **v)
+    {
+        return None;
+    }
+    Some(format!(
+        "{}..{} step {step}s",
+        vals[0],
+        vals[vals.len() - 1]
+    ))
+}
+
+/// One parsed timestamp: seconds since epoch in its own (suffix-opaque) timeline, plus the
+/// surface details needed to re-render it byte-identically.
+struct Ts {
+    epoch: i64,
+    sep: char,
+    suffix: String,
+}
+
+/// Strict ISO-8601-like shape — a *subset* of [`VARIABLE`]'s timestamp alternative
+/// (fractional seconds deliberately excluded: a range over them is not reconstructible
+/// from whole-second steps).
+static TS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(\d{4})-(\d{2})-(\d{2})([T ])(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:?\d{2})?$")
+        .unwrap()
+});
+
+fn parse_ts(v: &str) -> Option<Ts> {
+    let c = TS.captures(v)?;
+    let f = |i: usize| -> Option<i64> { c.get(i)?.as_str().parse().ok() };
+    let (y, mo, d) = (f(1)?, f(2)?, f(3)?);
+    let (h, mi, s) = (f(5)?, f(6)?, f(7)?);
+    let sep = c.get(4)?.as_str().chars().next()?;
+    let suffix = c.get(8).map(|m| m.as_str()).unwrap_or("").to_string();
+    let epoch = days_from_civil(y, mo, d) * 86_400 + h * 3_600 + mi * 60 + s;
+    Some(Ts { epoch, sep, suffix })
+}
+
+fn render_ts(epoch: i64, sep: char, suffix: &str) -> String {
+    let (y, m, d) = civil_from_days(epoch.div_euclid(86_400));
+    let secs = epoch.rem_euclid(86_400);
+    format!(
+        "{y:04}-{m:02}-{d:02}{sep}{:02}:{:02}:{:02}{suffix}",
+        secs / 3_600,
+        (secs % 3_600) / 60,
+        secs % 60
+    )
+}
+
+// ── Missed-fold telemetry (shape-registry stage 1) ──────────────────────────────────
+
+/// Capture directory for QA telemetry — the same opt-in `LLMTRIM_CAPTURE_DIR` the proxy's
+/// before/after capture uses. Read once; `None` (the default) costs nothing per fold.
+static CAPTURE_DIR: Lazy<Option<String>> = Lazy::new(|| {
+    std::env::var("LLMTRIM_CAPTURE_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+});
+
+/// Loosely datetime-shaped: a `H:M`-style time, an ISO `YYYY-MM` date prefix, or a
+/// slash date. Deliberately broad — this only gates *telemetry*, never output.
+static DATETIME_ISH: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\d:\d|\d{4}-\d{2}|\b\d{1,2}/\d{1,2}\b").unwrap());
+
+/// Report a parameter column that looked datetime-ish but fell back to the explicit list.
+/// Appends one JSONL record to `<capture dir>/missed_folds.jsonl` so the capture QA loop
+/// can rank which timestamp shapes a future shape registry should support (and whether
+/// jiff earns its place). Off unless `LLMTRIM_CAPTURE_DIR` is set; write failures are
+/// logged and swallowed — telemetry must never break a fold.
+fn record_missed_fold(vals: &[&str]) {
+    if let Some(dir) = CAPTURE_DIR.as_deref() {
+        write_missed_fold(dir, vals);
+    }
+}
+
+/// Env-independent body of [`record_missed_fold`] (testable without `set_var`).
+fn write_missed_fold(dir: &str, vals: &[&str]) {
+    if vals.is_empty() || !vals.iter().all(|v| DATETIME_ISH.is_match(v)) {
+        return;
+    }
+    // ISO shapes that parsed but had no constant step vs shapes we can't parse at all —
+    // the second bucket is the registry's shopping list.
+    let reason = if vals.iter().all(|v| TS.is_match(v)) {
+        "irregular_step"
+    } else {
+        "unsupported_shape"
+    };
+    let record = serde_json::json!({
+        "kind": "missed_fold",
+        "reason": reason,
+        "count": vals.len(),
+        "sample": vals.iter().take(5).collect::<Vec<_>>(),
+    });
+    use std::io::Write;
+    let path = std::path::Path::new(dir).join("missed_folds.jsonl");
+    let written = std::fs::create_dir_all(dir).and_then(|_| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| writeln!(f, "{record}"))
+    });
+    if let Err(e) = written {
+        eprintln!(
+            "llmtrim: missed-fold telemetry failed ({}): {e}",
+            path.display()
+        );
+    }
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Civil date from days since 1970-01-01 (Hinnant's `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
 // ── Global (non-adjacent) collapse ──────────────────────────────────────────────────
@@ -502,11 +765,8 @@ fn dominant_token<'a>(counts: &HashMap<&'a str, usize>, need: usize) -> Option<&
 /// same contract as [`render_run`]. Adjacent variable tokens (merged into one `{}` by
 /// [`vote_template`]) are space-joined within their slot.
 fn render_voted(tpl: &str, members: &[&str]) -> String {
-    let tuples: Vec<String> = members
-        .iter()
-        .map(|l| format!("({})", variable_values(tpl, l).join(",")))
-        .collect();
-    format!("{tpl} [×{}: {}]", members.len(), tuples.join(" "))
+    let rows: Vec<Vec<String>> = members.iter().map(|l| variable_values(tpl, l)).collect();
+    format!("{tpl} [×{}: {}]", members.len(), render_tuple_block(&rows))
 }
 
 /// Extract one line's values for each `{}` slot in `tpl`, walking template and line tokens
@@ -573,9 +833,43 @@ fn value_shaped(v: &str) -> bool {
     v.chars().any(|c| c.is_ascii_digit()) || VARIABLE.is_match(v)
 }
 
+/// Volatile-value-masked fingerprint of a whole output, for the repeat → passthrough
+/// rail: every line is reduced to its [`template_of`] template (numbers, hex, UUIDs,
+/// timestamps, IPs → `{}`), so two runs of one tool that differ only in such values —
+/// TAP's `duration_ms`, log timestamps, ports, PIDs — fingerprint identically, while
+/// any change in the *constant* text (a test flipping ok ↔ not ok, a new error line)
+/// changes it. A masked false match only ships an output uncompressed — safe.
+pub(crate) fn fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for line in text.lines() {
+        template_of(line).0.hash(&mut h);
+    }
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_ignores_volatile_values_but_not_results() {
+        let run = |d1: &str, d2: &str, t19: &str| {
+            format!(
+                "TAP version 13\nok 1 - parse\n  duration_ms: {d1}\n{t19} 19 - normalize\n  duration_ms: {d2}\n1..2"
+            )
+        };
+        assert_eq!(
+            fingerprint(&run("124.481897", "3.412345", "not ok")),
+            fingerprint(&run("64.649202", "9.000001", "not ok")),
+            "re-run differing only in timings fingerprints identically"
+        );
+        assert_ne!(
+            fingerprint(&run("124.481897", "3.412345", "not ok")),
+            fingerprint(&run("124.481897", "3.412345", "ok")),
+            "a test flipping not ok → ok changes the fingerprint"
+        );
+    }
 
     #[test]
     fn templates_mask_variables() {
@@ -746,14 +1040,13 @@ mod tests {
         // the numeric id 0..3 is the only variable, captured once per template.
         let text = interleaved_build(4);
         let (out, _) = collapse_global(&text);
-        for id in ["0", "1", "2", "3"] {
-            // Each id appears once in each of the two folded templates' tuples.
-            let hits = out.matches(id).count();
-            assert!(
-                hits >= 2,
-                "value {id} preserved for both templates (got {hits}): {out}"
-            );
-        }
+        // The id column 0..3 is a regular sequence, so it range-folds — every value is
+        // still exactly reconstructible from the notation, once per folded template.
+        assert_eq!(
+            out.matches("0..3").count(),
+            2,
+            "id column range-folded for both templates: {out}"
+        );
         // The static template words survive verbatim in the representative.
         assert!(
             out.contains("compiled object file"),
@@ -967,6 +1260,189 @@ mod tests {
         // Empty and single-char lines are handled without panicking.
         let _ = bucket_key("");
         let _ = bucket_key("北");
+    }
+
+    // ── Range-folded parameter columns ──────────────────────────────────────────────
+
+    fn rows(cols: &[&[&str]]) -> Vec<Vec<String>> {
+        let n = cols.first().map_or(0, |c| c.len());
+        (0..n)
+            .map(|r| cols.iter().map(|c| c[r].to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn integer_column_folds_to_range() {
+        let vals: Vec<String> = (0..30).map(|i| i.to_string()).collect();
+        let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+        let out = render_tuple_block(&rows(&[&refs]));
+        assert_eq!(out, "(0..29)");
+    }
+
+    #[test]
+    fn stepped_integer_column_folds_with_step() {
+        let vals: Vec<String> = (0..10).map(|i| (5 + i * 3).to_string()).collect();
+        let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+        let out = render_tuple_block(&rows(&[&refs]));
+        assert_eq!(out, "(5..32 step 3)");
+    }
+
+    #[test]
+    fn constant_column_emits_single_value() {
+        let out = render_tuple_block(&rows(&[
+            &["info", "info", "info", "info"],
+            &["1", "2", "3", "4"],
+        ]));
+        assert_eq!(out, "(info; 1..4)");
+    }
+
+    #[test]
+    fn timestamp_column_folds_with_seconds_step() {
+        let vals: Vec<String> = (0..30)
+            .map(|i| format!("2026-06-13T10:02:{i:02}Z"))
+            .collect();
+        let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+        let out = render_tuple_block(&rows(&[&refs]));
+        assert_eq!(out, "(2026-06-13T10:02:00Z..2026-06-13T10:02:29Z step 1s)");
+    }
+
+    #[test]
+    fn timestamp_range_crosses_minute_and_day_boundaries() {
+        // 30s step from 23:59:00 walks across midnight — Hinnant date math, round-tripped.
+        let vals: Vec<String> = (0..6)
+            .map(|i| {
+                render_ts(
+                    days_from_civil(2026, 6, 13) * 86_400 + 86_340 + i * 30,
+                    'T',
+                    "Z",
+                )
+            })
+            .collect();
+        assert_eq!(vals[0], "2026-06-13T23:59:00Z");
+        assert_eq!(vals[5], "2026-06-14T00:01:30Z");
+        let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+        let out = render_tuple_block(&rows(&[&refs]));
+        assert_eq!(out, "(2026-06-13T23:59:00Z..2026-06-14T00:01:30Z step 30s)");
+    }
+
+    #[test]
+    fn irregular_column_keeps_explicit_list() {
+        // Irregular step → row-wise tuples exactly as today.
+        let out = render_tuple_block(&rows(&[&["1", "2", "4", "9"]]));
+        assert_eq!(out, "(1) (2) (4) (9)");
+        // Mixed widths (leading zero) break canonical round-trip → explicit.
+        let out = render_tuple_block(&rows(&[&["01", "02", "03", "04"]]));
+        assert_eq!(out, "(01) (02) (03) (04)");
+        // Leap-second-shaped (":60") timestamps never parse → explicit.
+        let out = render_tuple_block(&rows(&[&[
+            "2026-06-30T23:59:59Z",
+            "2026-06-30T23:59:60Z",
+            "2026-07-01T00:00:01Z",
+        ]]));
+        assert!(out.starts_with("(2026-06-30T23:59:59Z) ("), "{out}");
+    }
+
+    #[test]
+    fn mixed_columns_fold_independently() {
+        // Column 0 is a range, column 1 stays an explicit comma list.
+        let out = render_tuple_block(&rows(&[
+            &["0", "1", "2", "3"],
+            &["db-01", "db-07", "db-02", "db-09"],
+        ]));
+        assert_eq!(out, "(0..3; db-01,db-07,db-02,db-09)");
+    }
+
+    #[test]
+    fn range_never_inflates_short_lists() {
+        // Two timestamps: "(a..b step 1s)" is LONGER than "(a) (b)" → keep row-wise.
+        let out = render_tuple_block(&rows(&[&["2026-06-13T10:02:00Z", "2026-06-13T10:02:01Z"]]));
+        assert_eq!(out, "(2026-06-13T10:02:00Z) (2026-06-13T10:02:01Z)");
+    }
+
+    #[test]
+    fn ambiguous_separator_values_decline_column_form() {
+        // A captured value containing the notation's own separators would make the column
+        // form unreconstructible → row-wise, even though column 0 is a perfect range.
+        let out = render_tuple_block(&rows(&[&["1", "2", "3"], &["\"a,b\"", "\"c\"", "\"d\""]]));
+        assert_eq!(out, "(1,\"a,b\") (2,\"c\") (3,\"d\")");
+    }
+
+    // ── Missed-fold telemetry ───────────────────────────────────────────────────────
+
+    /// Unique scratch dir per test (nextest runs each test in its own process, but keep
+    /// names disjoint anyway so the tests never share a file).
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("llmtrim-missed-fold-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn read_jsonl(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("missed_folds.jsonl")).unwrap_or_default()
+    }
+
+    #[test]
+    fn telemetry_records_irregular_iso_timestamps() {
+        let dir = scratch_dir("irregular");
+        write_missed_fold(
+            &dir.to_string_lossy(),
+            &[
+                "2026-06-13T10:02:32Z",
+                "2026-06-13T10:02:51Z",
+                "2026-06-13T10:02:33Z",
+            ],
+        );
+        let log = read_jsonl(&dir);
+        assert!(log.contains("\"reason\":\"irregular_step\""), "{log}");
+        assert!(log.contains("\"count\":3"), "{log}");
+        assert!(log.contains("2026-06-13T10:02:32Z"), "sample kept: {log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn telemetry_records_unsupported_datetime_shape() {
+        // Slash dates / bare times don't parse as our ISO shape — the registry's
+        // shopping list.
+        let dir = scratch_dir("unsupported");
+        write_missed_fold(
+            &dir.to_string_lossy(),
+            &[
+                "13/06/2026 10:02:00",
+                "13/06/2026 10:02:30",
+                "13/06/2026 10:03:00",
+            ],
+        );
+        let log = read_jsonl(&dir);
+        assert!(log.contains("\"reason\":\"unsupported_shape\""), "{log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn telemetry_ignores_non_datetime_columns() {
+        // Plain-word / id columns falling back is normal, not a missed shape — no record.
+        let dir = scratch_dir("words");
+        write_missed_fold(&dir.to_string_lossy(), &["db-01", "db-07", "db-02"]);
+        assert!(
+            !dir.join("missed_folds.jsonl").exists(),
+            "no file for non-datetime columns"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn end_to_end_collapse_range_folds_regular_run() {
+        let text: String = (0..30)
+            .map(|i| format!("[2026-06-13T10:02:{i:02}Z] INFO compiling task_{i} ok"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (out, folded) = collapse(&text);
+        assert!(folded);
+        assert_eq!(
+            out,
+            "[{}] INFO compiling task_{} ok [×30: \
+             (2026-06-13T10:02:00Z..2026-06-13T10:02:29Z step 1s; 0..29)]"
+        );
     }
 }
 

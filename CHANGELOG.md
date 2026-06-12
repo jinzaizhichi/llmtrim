@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Re-run → passthrough rail now survives non-deterministic output**: the rail that
+  ships a re-invoked tool's output in full used raw-text equality, so any run-to-run
+  noise — TAP's `duration_ms` timings, log timestamps, ports, PIDs — defeated it and
+  the retry was windowed identically. Repeat detection now compares a
+  volatile-value-masked fingerprint (the template stage's variable masking), so a
+  re-run that differs only in such values passes through in full, while a real result
+  change (a test flipping `ok` ↔ `not ok`) still compresses fresh.
 - **TAP test failures no longer elided** (reported against v0.1.5): a `node --test` /
   `prove` TAP log could lose its only failing test — `not ok N`, the YAML diagnostic,
   even the `# fail 1` summary — because the failure-signal regex didn't know TAP's
