@@ -48,7 +48,7 @@ brew install --build-from-source ./Formula/llmtrim.rb
 ## With Cargo
 
 ```bash
-cargo install llmtrim
+cargo install --locked llmtrim
 ```
 
 ## From source
@@ -58,7 +58,7 @@ git clone https://github.com/fkiene/llmtrim
 cd llmtrim
 cargo build --release
 # binary at target/release/llmtrim
-cargo install --path .
+cargo install --path . --locked
 ```
 
 Requires Rust 1.88+ (edition 2024). `rusqlite` is bundled (no system SQLite needed) and pinned at 0.39: 0.40+ pulls `libsqlite3-sys` 0.38, whose build script needs the still-unstable `cfg_select` ([rust#115585](https://github.com/rust-lang/rust/issues/115585)) and won't build on stable.
@@ -93,7 +93,7 @@ llmtrim update
 ```
 
 - **Binary** (`curl | sh`): re-runs the installer to fetch the latest release, then restarts.
-- **Cargo / Homebrew**: prints the right command (`cargo install llmtrim --force` /
+- **Cargo / Homebrew**: prints the right command (`cargo install --locked llmtrim --force` /
   `brew upgrade llmtrim`), then run `llmtrim setup` to restart the daemon on it.
 
 `status` shows a one-line notice when a newer release exists (checked at most once a day,

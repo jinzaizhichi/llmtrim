@@ -171,7 +171,7 @@ pub fn run() -> Result<()> {
         Channel::Cargo => instructions(
             "update via cargo",
             &[
-                "cargo install llmtrim --force",
+                "cargo install --locked llmtrim --force",
                 "llmtrim setup    # restart the daemon on the new binary",
             ],
         ),

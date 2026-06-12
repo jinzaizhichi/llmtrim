@@ -122,7 +122,7 @@ llmtrim status --watch
 irm https://raw.githubusercontent.com/fkiene/llmtrim/main/install.ps1 | iex
 ```
 
-Prefer to read what you run? `cargo install llmtrim` or `brew install fkiene/tap/llmtrim` - same `setup`, no script. Prebuilt for x64 and ARM64; WSL uses the Linux line. Full options in [INSTALL.md](INSTALL.md).
+Prefer to read what you run? `cargo install --locked llmtrim` or `brew install fkiene/tap/llmtrim` - same `setup`, no script. Prebuilt for x64 and ARM64; WSL uses the Linux line. Full options in [INSTALL.md](INSTALL.md).
 
 <p align="center">
   <picture>
