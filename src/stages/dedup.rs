@@ -63,6 +63,74 @@ impl Transform for DedupStage {
     }
 }
 
+/// Tag name + close flag when the trimmed line is *solely* an XML/HTML open or
+/// close tag — `<name …>` or `</name>` and nothing else (same structural signal
+/// as the provider trim's tag-block detection). Identifier chars: alphanumeric,
+/// `-`, `_`, `.`, `:`. Comments/PIs (`<!`, `<?`) and self-closing tags (`<x/>`,
+/// a complete element, not a block delimiter) return `None`.
+fn solo_tag_line(line: &str) -> Option<(&str, bool)> {
+    let t = line.trim();
+    let body = t.strip_prefix('<')?.strip_suffix('>')?;
+    let (body, is_close) = match body.strip_prefix('/') {
+        Some(rest) => (rest, true),
+        None => (body, false),
+    };
+    let is_ident = |c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':';
+    let name_end = body.find(|c| !is_ident(c)).unwrap_or(body.len());
+    let (name, rest) = body.split_at(name_end);
+    if name.is_empty() || !name.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+        return None;
+    }
+    if is_close {
+        // Close tag: only whitespace may follow the name.
+        rest.chars()
+            .all(char::is_whitespace)
+            .then_some((name, true))
+    } else {
+        // Open tag: optional attributes after whitespace; no nested `<`/`>`
+        // (that would mean more content on the line than the tag itself),
+        // and not self-closing.
+        ((rest.is_empty() || rest.starts_with(char::is_whitespace))
+            && !rest.contains(['<', '>'])
+            && !rest.trim_end().ends_with('/'))
+        .then_some((name, false))
+    }
+}
+
+/// Per-line fold-boundary signatures. `None` = ordinary line (folds freely).
+/// `Some(sig)` = the line is solely an XML open/close tag: it delimits a block
+/// and may only fold with a delimiter carrying an *equal* signature — the full
+/// text of the delimited block for matched pairs, or a unique sentinel for
+/// unmatched delimiters (which therefore never fold). Two delimiters thus merge
+/// only when their entire blocks are byte-identical, so the wrapper of every
+/// structurally distinct block survives a collapse.
+fn block_signatures(lines: &[&str]) -> Vec<Option<String>> {
+    let mut sigs: Vec<Option<String>> = vec![None; lines.len()];
+    let mut stack: Vec<(&str, usize)> = Vec::new(); // (tag name, open-line index)
+    for (i, line) in lines.iter().enumerate() {
+        match solo_tag_line(line) {
+            None => {}
+            Some((name, false)) => {
+                // Unique sentinel until matched (line index makes it unmergeable).
+                sigs[i] = Some(format!("\u{0}unmatched:{i}"));
+                stack.push((name, i));
+            }
+            Some((name, true)) => {
+                sigs[i] = Some(format!("\u{0}unmatched:{i}"));
+                if let Some(&(open_name, open_idx)) = stack.last()
+                    && open_name == name
+                {
+                    stack.pop();
+                    let block = lines[open_idx..=i].join("\n");
+                    sigs[open_idx] = Some(block.clone());
+                    sigs[i] = Some(block);
+                }
+            }
+        }
+    }
+    sigs
+}
+
 /// Collapse only *adjacent* runs of identical lines (`line [×N]`), keeping every
 /// distinct line in its original position. The safe variant for structured segments,
 /// where [`dedup_lines`]'s global first-occurrence merge would reorder records or
@@ -72,6 +140,7 @@ fn dedup_adjacent_lines(text: &str) -> String {
     if lines.len() < 2 {
         return text.to_string();
     }
+    let sigs = block_signatures(&lines);
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut collapsed = false;
     let mut i = 0;
@@ -79,7 +148,7 @@ fn dedup_adjacent_lines(text: &str) -> String {
         let line = lines[i];
         let mut n = 1;
         if !line.trim().is_empty() {
-            while i + n < lines.len() && lines[i + n] == line {
+            while i + n < lines.len() && lines[i + n] == line && sigs[i + n] == sigs[i] {
                 n += 1;
             }
         }
@@ -107,36 +176,41 @@ fn dedup_lines(text: &str, near: bool, max_dist: u32) -> String {
         return text.to_string();
     }
 
+    let sigs = block_signatures(&lines);
     let mut group_of: Vec<Option<usize>> = vec![None; lines.len()];
     let mut reps: Vec<u64> = Vec::new(); // representative SimHash per group
     let mut counts: Vec<usize> = Vec::new();
-    let mut exact: HashMap<&str, usize> = HashMap::new();
+    // Keyed by (line, block signature): delimiter lines only merge when their
+    // whole blocks are byte-identical; ordinary lines carry a `None` signature.
+    let mut exact: HashMap<(&str, Option<&str>), usize> = HashMap::new();
     let hasher = make_simhasher();
 
     for (i, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue; // blanks are structure, not content
         }
-        if let Some(&g) = exact.get(*line) {
+        let sig = sigs[i].as_deref();
+        if let Some(&g) = exact.get(&(*line, sig)) {
             group_of[i] = Some(g);
             counts[g] += 1;
             continue;
         }
         let sh = line_simhash(&hasher, line);
         if near
+            && sig.is_none()
             && let Some(g) = reps
                 .iter()
                 .position(|&rh| rh.hamming_distance(&sh) <= max_dist as usize)
         {
             group_of[i] = Some(g);
             counts[g] += 1;
-            exact.insert(line, g);
+            exact.insert((line, sig), g);
             continue;
         }
         let g = reps.len();
         reps.push(sh);
         counts.push(1);
-        exact.insert(line, g);
+        exact.insert((line, sig), g);
         group_of[i] = Some(g);
     }
 
@@ -315,6 +389,82 @@ mod tests {
         // Non-adjacent repeats stay separate.
         let interleaved = "x\ny\nx\ny";
         assert_eq!(dedup_adjacent_lines(interleaved), interleaved);
+    }
+
+    #[test]
+    fn differing_tag_blocks_keep_their_delimiters() {
+        // Regression (capture 1781260115569010-3cd0e6): two same-tag blocks
+        // sharing header lines but differing tails. The fold must not absorb
+        // the second block's open/close delimiter lines — its unique fields
+        // must stay inside its own wrappers.
+        let text = "<task-notification>\n\
+                    <task-id>br0iqqk7p</task-id>\n\
+                    <summary>Monitor event</summary>\n\
+                    </task-notification>\n\
+                    \n\
+                    <task-notification>\n\
+                    <task-id>br0iqqk7p</task-id>\n\
+                    <status>completed</status>\n\
+                    <summary>stream ended</summary>\n\
+                    </task-notification>";
+        let out = dedup_lines(text, false, 0);
+        let opens = out.matches("<task-notification>").count();
+        let closes = out.matches("</task-notification>").count();
+        assert_eq!(opens, 2, "both open tags survive:\n{out}");
+        assert_eq!(closes, 2, "both close tags survive:\n{out}");
+        // Unique fields of block 2 sit between its own open and close tags.
+        let second_open = out
+            .match_indices("<task-notification>")
+            .nth(1)
+            .expect("second open")
+            .0;
+        let second_close = out.rfind("</task-notification>").expect("second close");
+        let status = out.find("<status>completed</status>").expect("status kept");
+        assert!(
+            second_open < status && status < second_close,
+            "unique field stays inside second block's wrappers:\n{out}"
+        );
+        // The shared header line may still fold with a count.
+        assert!(
+            out.contains("<task-id>br0iqqk7p</task-id> [×2]"),
+            "shared inner lines still fold:\n{out}"
+        );
+        // Same protection on the adjacent (structured-segment) variant.
+        let adj = dedup_adjacent_lines("<t>\n<t>\nx\n</t>\n</t>");
+        assert_eq!(
+            adj, "<t>\n<t>\nx\n</t>\n</t>",
+            "nested delimiters untouched"
+        );
+    }
+
+    #[test]
+    fn byte_identical_tag_blocks_still_fold() {
+        // Truly identical duplicate blocks (genuine repeated notifications)
+        // may fold whole — existing savings preserved.
+        let block = "<note>\nsame body\n</note>";
+        let text = format!("{block}\n{block}");
+        let out = dedup_lines(&text, false, 0);
+        assert_eq!(out, "<note> [×2]\nsame body [×2]\n</note> [×2]");
+    }
+
+    #[test]
+    fn solo_tag_line_detection() {
+        assert_eq!(solo_tag_line("<name>"), Some(("name", false)));
+        assert_eq!(
+            solo_tag_line("  <a-b_c.d:e attr=\"1\">  "),
+            Some(("a-b_c.d:e", false))
+        );
+        assert_eq!(solo_tag_line("</name>"), Some(("name", true)));
+        assert_eq!(solo_tag_line("<x>y</x>"), None, "content on the line");
+        assert_eq!(
+            solo_tag_line("<x/>"),
+            None,
+            "self-closing is a whole element"
+        );
+        assert_eq!(solo_tag_line("<!-- c -->"), None);
+        assert_eq!(solo_tag_line("<?xml version=\"1.0\"?>"), None);
+        assert_eq!(solo_tag_line("plain text"), None);
+        assert_eq!(solo_tag_line("< name>"), None, "no space before name");
     }
 
     #[test]
