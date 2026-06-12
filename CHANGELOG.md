@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **TAP test failures no longer elided** (reported against v0.1.5): a `node --test` /
+  `prove` TAP log could lose its only failing test — `not ok N`, the YAML diagnostic,
+  even the `# fail 1` summary — because the failure-signal regex didn't know TAP's
+  `not ok` marker (nor camelCase tokens like `failureType: 'testCodeFailure'`), and
+  the retrieve stage ranked chunks purely by query relevance with no failure
+  protection at all. Failure-signal lines and their continuation blocks (indented
+  traceback frames; for TAP, the whole diagnostic up to the next test point) now
+  survive pruning in both the tool-output and retrieve stages, regardless of query
+  overlap.
+
 ## [0.1.5] - 2026-06-12
 
 ### Added

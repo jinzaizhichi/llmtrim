@@ -238,13 +238,29 @@ fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<
     if keep >= chunks.len() {
         return None; // nothing to drop
     }
+    // Failure-signal chunks survive regardless of query relevance: a test/build failure
+    // ("not ok 19 - …", "ERROR …") rarely shares words with the user's ask ("run the
+    // tests"), so pure relevance ranking elides exactly the lines the agent needs.
+    // Forced into every selection path below, over budget if need be — correctness over
+    // budget; the token gate still arbitrates the net result.
+    let protected = failure_protected(&chunks);
+    let with_protected = |mut idx: Vec<usize>| -> Vec<usize> {
+        idx.extend_from_slice(&protected);
+        idx.sort_unstable();
+        idx.dedup();
+        idx
+    };
     // Query-less ranking uses TextRank, whose dense n×n similarity matrix is O(n²) memory —
     // tens of thousands of line-chunks (a large log) would allocate gigabytes and abort the
     // process. Above the cap, skip centrality entirely and fall back to a head+tail keep
     // (boundary-safe, O(n)). Never block the user.
     let ranked = if query.is_empty() {
         if chunks.len() > TEXTRANK_MAX_CHUNKS {
-            return Some(rebuild(&chunks, &head_tail_keep(keep, chunks.len()), sep));
+            return Some(rebuild(
+                &chunks,
+                &with_protected(head_tail_keep(keep, chunks.len())),
+                sep,
+            ));
         }
         textrank_rank(&chunks)
     } else {
@@ -253,7 +269,7 @@ fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<
     if !cfg.reorder && !cfg.mmr {
         return Some(rebuild(
             &chunks,
-            &budgeted_select(&chunks, &ranked, keep, cfg),
+            &with_protected(budgeted_select(&chunks, &ranked, keep, cfg)),
             sep,
         ));
     }
@@ -262,6 +278,7 @@ fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<
     } else {
         ranked.iter().copied().take(keep).collect::<Vec<usize>>()
     };
+    chosen.extend_from_slice(&protected);
     pin_boundaries(&mut chosen, chunks.len());
     if cfg.reorder {
         Some(rebuild_ordered(&chunks, &u_shape(&chosen), sep))
@@ -270,6 +287,43 @@ fn rebuild_chunked(text: &str, query: &[String], cfg: &RetrieveStage) -> Option<
         chosen.dedup();
         Some(rebuild(&chunks, &chosen, sep))
     }
+}
+
+/// Indices of chunks that carry a failure-level signal (the toolout stage's STRONG
+/// machine-token set: `error`, `panic`, TAP's `not ok`, …) plus the continuation
+/// chunks that follow one — the indented traceback frames, or for a TAP failure the
+/// whole YAML diagnostic up to the next test point. These must survive pruning no
+/// matter how little they overlap the query.
+fn failure_protected(chunks: &[String]) -> Vec<usize> {
+    use crate::stages::toolout::signals::STRONG;
+    /// A failing TAP test point (`not ok 19 - …`) — opens a YAML diagnostic block.
+    static TAP_FAIL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^not ok\b").unwrap());
+    /// Any new TAP record (test point, plan, comment) — closes the diagnostic block.
+    /// Matched on trimmed text: the sentence-grained path strips indentation, so the
+    /// block can't be delimited by leading whitespace there.
+    static TAP_RECORD: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)^(not ok\b|ok\s+\d|\d+\.\.\d+|#)").unwrap());
+    let mut out = Vec::new();
+    let mut indent_block = false; // after a STRONG line: indented continuations
+    let mut tap_block = false; // after `not ok`: everything until the next TAP record
+    for (i, c) in chunks.iter().enumerate() {
+        let t = c.trim_start();
+        if tap_block && !TAP_RECORD.is_match(t) {
+            out.push(i); // inside the failure's YAML diagnostic
+            continue;
+        }
+        tap_block = false;
+        if STRONG.is_match(c) {
+            out.push(i);
+            indent_block = true;
+            tap_block = TAP_FAIL.is_match(t);
+        } else if indent_block && (c.starts_with(' ') || c.starts_with('\t')) {
+            out.push(i); // indented continuation (traceback frame) of the failure
+        } else {
+            indent_block = false;
+        }
+    }
+    out
 }
 
 /// Maximum chunk count for which TextRank's dense O(n²) centrality matrix is built. Above
@@ -382,10 +436,16 @@ fn prune_sentences(
         return (0..n).collect();
     }
     let relevant: Vec<bool> = score.iter().map(|&s| s > 0).collect();
+    // Failure-signal sentences are kept unconditionally (see [`failure_protected`]) —
+    // a test failure rarely shares content words with the question that ran the tests.
+    let mut protected = vec![false; n];
+    for i in failure_protected(chunks) {
+        protected[i] = true;
+    }
     let mut keep = vec![false; n];
     for (i, k) in keep.iter_mut().enumerate() {
         let neighbour = (i > 0 && relevant[i - 1]) || (i + 1 < n && relevant[i + 1]);
-        if relevant[i] || neighbour || i == 0 || i == n - 1 {
+        if relevant[i] || neighbour || protected[i] || i == 0 || i == n - 1 {
             *k = true;
         }
     }
@@ -397,7 +457,7 @@ fn prune_sentences(
     if kept_count > target {
         let best = (0..n).max_by_key(|&i| score[i]).unwrap_or(0);
         let mut droppable: Vec<usize> = (0..n)
-            .filter(|&i| keep[i] && i != 0 && i != n - 1 && i != best)
+            .filter(|&i| keep[i] && !protected[i] && i != 0 && i != n - 1 && i != best)
             .collect();
         droppable.sort_by_key(|&i| (score[i], i)); // lowest relevance first
         let mut excess = kept_count - target;
@@ -1741,6 +1801,90 @@ mod tests {
             mmr_lambda: 0.5,
             sentence: false,
         }
+    }
+
+    /// A TAP log (node --test / prove): one buried failure with its YAML diagnostic
+    /// block, drowned in passing tests. The failure marker is `not ok` — no
+    /// error/fail token — and shares no content word with the query.
+    fn tap_log() -> String {
+        let mut lines = vec!["TAP version 13".to_string()];
+        for i in 1..=52 {
+            if i == 19 {
+                lines.extend(
+                    [
+                        "not ok 19 - normalize: Windows backslash path matches POSIX entry",
+                        "  ---",
+                        "  failureType: 'testCodeFailure'",
+                        "  error: |-",
+                        "    Expected values to be strictly deep-equal:",
+                        "    + Symbol(FAIL_OPEN)",
+                        "    - true",
+                        "  ...",
+                    ]
+                    .map(String::from),
+                );
+            } else {
+                lines.push(format!(
+                    "ok {i} - isInList: case {i} returns expected result"
+                ));
+                lines.push(format!("  duration_ms: {}.123456", i * 3));
+            }
+        }
+        lines.push("1..52".to_string());
+        lines.push("# pass 51".to_string());
+        lines.push("# fail 1".to_string());
+        lines.join("\n")
+    }
+
+    #[test]
+    fn tap_failure_block_survives_chunk_pruning() {
+        // The Reddit-reported bug: query-relevance ranking elided the only failing
+        // test from a TAP log. Failure-signal chunks must survive any keep_ratio.
+        let query = lex_words("run the tests");
+        let out =
+            rebuild_chunked(&tap_log(), &query, &retrieve_cfg(0.1)).expect("large log prunes");
+        assert!(out.contains("not ok 19"), "failure line survives: {out}");
+        assert!(
+            out.contains("testCodeFailure") && out.contains("Symbol(FAIL_OPEN)"),
+            "indented diagnostic block survives with its failure: {out}"
+        );
+        assert!(out.contains("# fail 1"), "summary fail count survives");
+        assert!(out.contains("omitted"), "passing noise still pruned");
+    }
+
+    #[test]
+    fn tap_diagnostic_survives_without_indentation() {
+        // The sentence-grained path trims chunks, so the diagnostic block can't be
+        // recognized by leading whitespace — only by TAP record structure.
+        let chunks: Vec<String> = tap_log().lines().map(|l| l.trim().to_string()).collect();
+        let kept = failure_protected(&chunks);
+        let joined: String = kept.iter().map(|&i| chunks[i].as_str()).collect();
+        assert!(joined.contains("not ok 19"));
+        assert!(
+            joined.contains("Symbol(FAIL_OPEN)"),
+            "trimmed diagnostic protected"
+        );
+        assert!(
+            !joined.contains("ok 20"),
+            "block closes at the next test point"
+        );
+    }
+
+    #[test]
+    fn tap_failure_block_survives_sentence_pruning() {
+        let chunks: Vec<String> = tap_log().lines().map(String::from).collect();
+        let query = lex_words("run the tests");
+        let stops = stopword_set(&tap_log());
+        let kept = prune_sentences(&chunks, &query, &stops, 0.1);
+        let joined: String = kept.iter().map(|&i| chunks[i].as_str()).collect();
+        assert!(
+            joined.contains("not ok 19"),
+            "failure line survives the cap"
+        );
+        assert!(
+            joined.contains("Symbol(FAIL_OPEN)"),
+            "diagnostic survives the cap"
+        );
     }
 
     #[test]

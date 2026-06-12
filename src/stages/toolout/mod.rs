@@ -48,7 +48,7 @@ mod grep;
 mod log;
 mod normalize;
 mod plaintext;
-mod signals;
+pub(crate) mod signals;
 mod template;
 
 use std::collections::HashSet;
