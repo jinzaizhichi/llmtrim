@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`cargo install llmtrim` no longer requires mold**: the published crate accidentally
+  shipped `.cargo/config.toml` with the local mold-linker setting, breaking the install
+  build on machines without mold (caught by `cargo publish`'s verify on v0.1.2 — that
+  version never reached crates.io). Now excluded from the package.
+- **npm publish**: package directories are passed with a `./` prefix (a bare `a/b`
+  argument is npm's GitHub-repo shorthand and made publish try to clone from GitHub).
+
+### Changed
+- **npm packages are scoped: `@llmtrim/cli`** (+ `@llmtrim/<os>-<arch>` platform
+  packages). The unscoped `llmtrim` npm name belongs to an unrelated 2025 package —
+  installing it does not get you this tool.
+
 ## [0.1.2] - 2026-06-12
 
 ### Added
