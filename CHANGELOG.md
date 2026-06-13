@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **UniFFI bindings (`llmtrim-uniffi`) + Python wheel.** A new binding crate exposes
+  `llmtrim-core` to Python, Ruby, Swift and Kotlin from one Rust definition: a flat
+  `compress(input, provider, preset) -> CompressOutput` surface with mapped error
+  variants. Compression runs natively in-process (no server, no async). A reproducible
+  `scripts/build-wheel.sh` produces a self-contained Python wheel; Ruby/Swift/Kotlin
+  glue generate from the same built library. See `crates/llmtrim-uniffi/README.md`.
+
 ### Changed
 - **Split into a Cargo workspace: `llmtrim-core` (engine) + `llmtrim` (CLI/proxy).**
   The deterministic compression engine — `compress`/`compress_with_config`/`route`/
