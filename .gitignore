@@ -54,3 +54,8 @@ CLAUDE.md
 # Python bytecode from running the binding tests
 __pycache__/
 *.pyc
+
+# UniFFI packaging build artifacts (generated glue + bundled native libs + built packages)
+/crates/llmtrim-uniffi/packaging/ruby/lib/llmtrim/llmtrim_ffi.rb
+/crates/llmtrim-uniffi/packaging/ruby/lib/llmtrim/libllmtrim_ffi.*
+/crates/llmtrim-uniffi/packaging/**/*.gem
