@@ -59,6 +59,39 @@ jobs:
       - name: Compile CLI lib without the interceptor
         run: cargo check -p llmtrim --no-default-features --lib
 
+  # Exercise the UniFFI bindings end-to-end, not just the Rust-side tests in the `test`
+  # job: generating all four languages catches a binding-definition break (incl. Swift +
+  # Kotlin, whose toolchains we don't install), and the Python wheel + Ruby suites prove
+  # the FFI surface actually loads and compresses from each host language.
+  bindings:
+    name: UniFFI bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - run: pip install maturin pytest wheel
+      - run: gem install ffi --no-document
+      # Smoke: all four languages must generate from the one Rust definition (this is the
+      # only coverage Swift/Kotlin get — it fails if the binding API stops being FFI-shaped).
+      - name: Generate bindings (python/ruby/swift/kotlin)
+        run: crates/llmtrim-uniffi/scripts/generate-bindings.sh "$RUNNER_TEMP/bindings"
+      - name: Python — build wheel, install, pytest
+        run: |
+          crates/llmtrim-uniffi/scripts/build-wheel.sh
+          pip install target/wheels/llmtrim-*.whl
+          pytest crates/llmtrim-uniffi/tests/python -q
+      - name: Ruby — minitest against the generated glue
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/debug
+        run: ruby -I"$RUNNER_TEMP/bindings/ruby" crates/llmtrim-uniffi/tests/ruby/test_llmtrim.rb
+
   # Gate the AGPL-3.0-only relicensing: fail if any dependency carries a license
   # outside deny.toml's allow-list (e.g. GPL/proprietary) or an unknown source.
   license-check:

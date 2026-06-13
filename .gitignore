@@ -50,3 +50,7 @@ CLAUDE.md
 
 # UniFFI generated bindings (build artifacts; regenerate per release)
 /crates/llmtrim-uniffi/bindings/
+
+# Python bytecode from running the binding tests
+__pycache__/
+*.pyc
