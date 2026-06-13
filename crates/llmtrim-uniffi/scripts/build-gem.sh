@@ -31,8 +31,8 @@ dbg="$(find_cdylib target/debug)"
 cargo run -q --bin uniffi-bindgen -p llmtrim-uniffi -- generate --library "$dbg" --language ruby --out-dir "$lib_dir"
 
 echo "==> building the optimized cdylib to bundle"
-cargo build --release -p llmtrim-uniffi
-rel="$(find_cdylib target/release)"
+cargo build --release -p llmtrim-uniffi ${LLMTRIM_TARGET:+--target "$LLMTRIM_TARGET"}
+rel="$(find_cdylib "target/${LLMTRIM_TARGET:+$LLMTRIM_TARGET/}release")"
 [ -n "$rel" ] || { echo "error: no release cdylib in target/release/" >&2; exit 1; }
 base="$(basename "$rel")"
 cp "$rel" "$lib_dir/$base"

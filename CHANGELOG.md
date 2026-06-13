@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Language-binding publishes (PyPI / RubyGems / Maven Central) now build their
+  `x86_64-apple-darwin` artifacts by cross-compiling on an arm64 macOS runner** instead of
+  natively on a `macos-13` Intel runner. Intel macOS hosted runners are scarce and the
+  `v0.1.7` binding jobs stalled in the queue, blocking those publishes. The CLI/crate
+  release was unaffected. The build scripts now honor an optional `LLMTRIM_TARGET`.
+
 ## [0.1.7] - 2026-06-13
 
 ### Added

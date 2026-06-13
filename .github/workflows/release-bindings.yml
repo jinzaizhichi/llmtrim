@@ -36,7 +36,7 @@ jobs:
         include:
           - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-22.04-arm,  target: aarch64-unknown-linux-gnu }
-          - { os: macos-13,          target: x86_64-apple-darwin }
+          - { os: macos-latest,      target: x86_64-apple-darwin }   # cross-compiled (Intel runners are scarce)
           - { os: macos-latest,      target: aarch64-apple-darwin }
           - { os: windows-latest,    target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
@@ -53,8 +53,15 @@ jobs:
       # Builds the self-contained wheel (cdylib + injected UniFFI glue) for this runner's
       # platform; --release for the shipped artifact.
       - name: Build wheel
-        run: crates/llmtrim-uniffi/scripts/build-wheel.sh --release
+        env:
+          LLMTRIM_TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$LLMTRIM_TARGET"
+          crates/llmtrim-uniffi/scripts/build-wheel.sh --release
+      # The x86_64 wheel is cross-built on an arm64 runner, so it can't run here — skip its
+      # smoke (the native-arch wheels still get tested).
       - name: Smoke-test the wheel before publishing
+        if: matrix.target != 'x86_64-apple-darwin'
         run: |
           pip install target/wheels/llmtrim-*.whl
           pytest crates/llmtrim-uniffi/tests/python -q
@@ -89,7 +96,7 @@ jobs:
         include:
           - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-22.04-arm,  target: aarch64-unknown-linux-gnu }
-          - { os: macos-13,          target: x86_64-apple-darwin }
+          - { os: macos-latest,      target: x86_64-apple-darwin }   # cross-compiled (Intel runners are scarce)
           - { os: macos-latest,      target: aarch64-apple-darwin }
           - { os: windows-latest,    target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
@@ -105,7 +112,9 @@ jobs:
       - name: Build gem
         env:
           LLMTRIM_VERSION: ${{ github.ref_name }}
+          LLMTRIM_TARGET: ${{ matrix.target }}
         run: |
+          rustup target add "$LLMTRIM_TARGET"
           # gem versions use X.Y.Z (no leading v).
           export LLMTRIM_VERSION="${LLMTRIM_VERSION#v}"
           crates/llmtrim-uniffi/scripts/build-gem.sh
@@ -149,7 +158,7 @@ jobs:
         include:
           - { os: ubuntu-22.04,    target: x86_64-unknown-linux-gnu,  jna: linux-x86-64 }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, jna: linux-aarch64 }
-          - { os: macos-13,         target: x86_64-apple-darwin,       jna: darwin-x86-64 }
+          - { os: macos-latest,     target: x86_64-apple-darwin,       jna: darwin-x86-64 }   # cross-compiled
           - { os: macos-latest,     target: aarch64-apple-darwin,      jna: darwin-aarch64 }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc,    jna: win32-x86-64 }
           - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,   jna: win32-aarch64 }
@@ -160,9 +169,10 @@ jobs:
       - name: Build release cdylib
         shell: bash
         run: |
-          cargo build --release -p llmtrim-uniffi
+          rustup target add ${{ matrix.target }}
+          cargo build --release -p llmtrim-uniffi --target ${{ matrix.target }}
           mkdir out
-          cp target/release/{libllmtrim_ffi.so,libllmtrim_ffi.dylib,llmtrim_ffi.dll} out/ 2>/dev/null || true
+          cp target/${{ matrix.target }}/release/{libllmtrim_ffi.so,libllmtrim_ffi.dylib,llmtrim_ffi.dll} out/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.jna }}

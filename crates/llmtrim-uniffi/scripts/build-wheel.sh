@@ -23,8 +23,10 @@ py="$(command -v python3 || command -v python)"
 
 cd "$crate_dir"
 
-echo "==> maturin build (native cdylib in wheel)"
-maturin build $profile_flag -o "$dist_dir"
+echo "==> maturin build (cdylib in wheel)"
+# LLMTRIM_TARGET cross-compiles (e.g. x86_64-apple-darwin on an arm64 macOS runner), which
+# is how we avoid depending on scarce Intel-mac runners. Unset = native host build.
+maturin build $profile_flag ${LLMTRIM_TARGET:+--target "$LLMTRIM_TARGET"} -o "$dist_dir"
 
 wheel="$(ls -t "$dist_dir"/llmtrim-*.whl | head -1)"
 echo "==> base wheel: $wheel"
