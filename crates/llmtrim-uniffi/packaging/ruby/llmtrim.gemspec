@@ -14,7 +14,7 @@ Gem::Specification.new do |s|
   # Platform-specific gem (bundled native lib). The build script sets this to the target
   # platform; unset means a generic gem (used only for local `gem build` smoke).
   s.platform = ENV["LLMTRIM_GEM_PLATFORM"] if ENV["LLMTRIM_GEM_PLATFORM"]
-  s.summary = "Static, deterministic LLM prompt/payload compression — cut input tokens 30-90%."
+  s.summary = "Static, deterministic LLM prompt/payload compression that cuts input tokens 30-90%."
   s.description = "Native in-process bindings to the llmtrim-core compression engine " \
                   "(no network, no extra model calls), generated via UniFFI."
   s.authors = ["François Kiene"]

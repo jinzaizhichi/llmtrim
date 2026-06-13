@@ -24,6 +24,21 @@ find_cdylib() {
     done
 }
 
+# The gem's platform must describe the TARGET, not the build host. When cross-compiling
+# (x86_64-apple-darwin on an arm64 macOS runner) `Gem::Platform.local` returns the host
+# (arm64-darwin) and the gem collides with the native arm64 gem, so the Intel-mac gem never
+# ships. Derive it from LLMTRIM_TARGET; the version-agnostic darwin form installs on any
+# macOS version. Windows/linux host == target, so fall back to the local platform there.
+gem_platform() {
+    case "${LLMTRIM_TARGET:-}" in
+        x86_64-*-linux-gnu)   echo "x86_64-linux" ;;
+        aarch64-*-linux-gnu)  echo "aarch64-linux" ;;
+        x86_64-apple-darwin)  echo "x86_64-darwin" ;;
+        aarch64-apple-darwin) echo "arm64-darwin" ;;
+        *)                    ruby -e 'puts Gem::Platform.local' ;;
+    esac
+}
+
 echo "==> generating UniFFI Ruby glue (from the unstripped debug build)"
 cargo build -p llmtrim-uniffi
 dbg="$(find_cdylib target/debug)"
@@ -43,7 +58,8 @@ echo "==> patching ffi_lib to load the bundled library ($base)"
 perl -i -pe "s{ffi_lib 'llmtrim_ffi'}{ffi_lib File.expand_path('$base', __dir__)}" \
     "$lib_dir/llmtrim_ffi.rb"
 
-echo "==> gem build (platform: $(ruby -e 'puts Gem::Platform.local'))"
+plat="$(gem_platform)"
+echo "==> gem build (platform: $plat)"
 cd "$pkg_dir"
-LLMTRIM_GEM_PLATFORM="$(ruby -e 'puts Gem::Platform.local')" gem build llmtrim.gemspec
+LLMTRIM_GEM_PLATFORM="$plat" gem build llmtrim.gemspec
 echo "==> built: $(ls -t "$pkg_dir"/*.gem | head -1)"

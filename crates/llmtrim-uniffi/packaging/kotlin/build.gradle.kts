@@ -1,7 +1,7 @@
 // Publishable JVM library for the llmtrim Kotlin bindings.
 //
 // The UniFFI-generated Kotlin (src/main/kotlin/uniffi/…) loads the native engine through
-// JNA, which resolves the library from the classpath at /<os-arch>/ — so the compiled
+// JNA, which resolves the library from the classpath at /<os-arch>/, so the compiled
 // cdylib is bundled under src/main/resources/<os-arch>/ and ends up inside the jar. Both
 // the generated sources and the native resources are placed by scripts/build-maven.sh and
 // are git-ignored build artifacts. A release jar bundles every platform's library.
@@ -47,7 +47,7 @@ mavenPublishing {
     coordinates("io.github.fkiene", "llmtrim", project.version.toString())
     pom {
         name.set("llmtrim")
-        description.set("Static, deterministic LLM prompt/payload compression — cut input tokens 30-90% with zero extra model calls.")
+        description.set("Static, deterministic LLM prompt/payload compression that cuts input tokens 30-90% with zero extra model calls.")
         url.set("https://github.com/fkiene/llmtrim")
         licenses {
             license {

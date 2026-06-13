@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Python package now carries its README on PyPI.** The wheel set a summary but no long
+  description, so the PyPI project page showed "no project description". `pyproject.toml`
+  now points `readme` at the binding README.
+- **Intel-mac Ruby gem (`x86_64-darwin`) now publishes.** The cross-compiled gem inherited
+  the build host's platform (`Gem::Platform.local` -> `arm64-darwin`) and collided with the
+  native arm64 gem, so it never shipped. The gem platform is derived from the build target
+  instead.
+- **Package metadata reads cleanly.** Removed the em-dash from the shared description string
+  used by the PyPI summary, the Maven Central description, and the gem summary.
+
 ## [0.1.9] - 2026-06-13
 
 ### Added

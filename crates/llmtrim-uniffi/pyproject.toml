@@ -4,7 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "llmtrim"
-description = "Static, deterministic LLM prompt/payload compression — cut input tokens 30-90% with zero extra model calls."
+description = "Static, deterministic LLM prompt/payload compression that cuts input tokens 30-90% with zero extra model calls."
+readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "AGPL-3.0-only" }
 keywords = ["llm", "tokens", "compression", "openai", "anthropic"]
