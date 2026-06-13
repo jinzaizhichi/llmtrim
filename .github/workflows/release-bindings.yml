@@ -22,14 +22,20 @@ permissions:
 
 jobs:
   # ---- Python: build a wheel per platform, then publish all to PyPI via OIDC ----------
+  # The Linux jobs build on ubuntu-22.04 (glibc 2.35) rather than -latest (2.39): the
+  # bundled cdylib links against the build host's glibc, so a newer host yields a
+  # manylinux tag most current distros can't install. 22.04 covers Ubuntu 22.04+/Debian
+  # 12+. For maximum reach (RHEL 9, older), build inside a manylinux_2_28 container — the
+  # proper fix, left as a follow-up. The same glibc-floor reasoning applies to ruby-build
+  # and kotlin-natives below.
   python-build:
     name: Python wheel (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,     target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm,  target: aarch64-unknown-linux-gnu }
           - { os: macos-13,          target: x86_64-apple-darwin }
           - { os: macos-latest,      target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
@@ -77,8 +83,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,     target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm,  target: aarch64-unknown-linux-gnu }
           - { os: macos-13,          target: x86_64-apple-darwin }
           - { os: macos-latest,      target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
@@ -133,11 +139,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  jna: linux-x86-64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, jna: linux-aarch64 }
+          - { os: ubuntu-22.04,    target: x86_64-unknown-linux-gnu,  jna: linux-x86-64 }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, jna: linux-aarch64 }
           - { os: macos-13,         target: x86_64-apple-darwin,       jna: darwin-x86-64 }
           - { os: macos-latest,     target: aarch64-apple-darwin,      jna: darwin-aarch64 }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc,    jna: win32-x86-64 }
+          - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,   jna: win32-aarch64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6

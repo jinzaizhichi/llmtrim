@@ -62,7 +62,10 @@ crates/llmtrim-uniffi/scripts/generate-bindings.sh out/   # python, ruby, swift,
 > therefore generates from the (unstripped) debug build; the native library you *ship* can be
 > a stripped `cargo build --release -p llmtrim-uniffi` cdylib — the glue loads it by name.
 
-Ruby (verified) — put `libllmtrim_ffi.so` on the load path and:
+Ruby (verified) — this is the **raw generated binding** (module `LlmtrimFfi`), for a
+source build with `libllmtrim_ffi.so` on the load path. The published **gem** aliases it to
+`Llmtrim` (`require "llmtrim"` → `Llmtrim.compress(...)`) — see
+[`packaging/ruby`](packaging/ruby).
 
 ```ruby
 require_relative "llmtrim_ffi"

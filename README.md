@@ -225,7 +225,7 @@ echo '{"model":"gpt-4o","messages":[...]}' | llmtrim send     --provider openai 
 **Rust** — the engine is the [`llmtrim-core`](https://crates.io/crates/llmtrim-core) crate (no `tokio`, no network in its dependency tree):
 
 ```rust
-use llmtrim_core::{compress, config::DenseConfig, ir::ProviderKind};
+use llmtrim_core::{compress, compress_with_config, config::DenseConfig, ir::ProviderKind};
 
 // None auto-detects the provider from the request shape.
 let out = compress(request_json, Some(ProviderKind::OpenAi))?;
