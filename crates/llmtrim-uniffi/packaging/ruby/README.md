@@ -1,7 +1,7 @@
 # llmtrim (Ruby)
 
 Native, in-process bindings to the [llmtrim](https://github.com/fkiene/llmtrim)
-compression engine — cut LLM input tokens 30–90% with zero extra model calls, no network,
+compression engine, cutting LLM input tokens 30–90% with zero extra model calls, no network,
 no server. The compiled engine is bundled in the gem, so no Rust toolchain is needed.
 
 ```ruby
@@ -15,7 +15,7 @@ puts "#{out.input_tokens_before} -> #{out.input_tokens_after}"
 # send out.request_json to the provider
 ```
 
-`compress(input, provider, preset)` — `provider` is `Llmtrim::Provider::OPEN_AI` /
+`compress(input, provider, preset)`: `provider` is `Llmtrim::Provider::OPEN_AI` /
 `ANTHROPIC` / `GOOGLE` or `nil` to auto-detect; `preset` is a workload name
 (`"aggressive"`, `"agent"`, `"code"`, `"rag"`, `"safe"`, …) or `nil` for the environment
 config. Raises `Llmtrim::LlmtrimError::Compress` / `UnknownPreset` on error.

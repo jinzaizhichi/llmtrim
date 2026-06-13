@@ -1,7 +1,7 @@
 # llmtrim (Kotlin / JVM)
 
 Native, in-process bindings to the [llmtrim](https://github.com/fkiene/llmtrim)
-compression engine for the JVM — cut LLM input tokens 30–90%, no network, no extra model
+compression engine for the JVM, cutting LLM input tokens 30–90%, no network, no extra model
 calls. The compiled engine is bundled in the jar (loaded via JNA from the classpath), so
 no Rust toolchain is needed at runtime.
 
@@ -15,7 +15,7 @@ println("${out.inputTokensBefore} -> ${out.inputTokensAfter}")
 // send out.requestJson to the provider
 ```
 
-`compress(input, provider, preset)` — `provider` is `Provider.OPEN_AI`/`ANTHROPIC`/`GOOGLE`
+`compress(input, provider, preset)`: `provider` is `Provider.OPEN_AI`/`ANTHROPIC`/`GOOGLE`
 or `null` to auto-detect; `preset` is a workload name or `null` for the environment config.
 Throws `LlmtrimException.Compress` / `UnknownPreset`.
 
