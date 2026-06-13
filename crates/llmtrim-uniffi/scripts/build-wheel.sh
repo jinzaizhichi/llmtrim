@@ -18,6 +18,9 @@ dist_dir="$workspace_root/target/wheels"
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
+# Windows ships `python`, not `python3`.
+py="$(command -v python3 || command -v python)"
+
 cd "$crate_dir"
 
 echo "==> maturin build (native cdylib in wheel)"
@@ -33,15 +36,18 @@ echo "==> generating UniFFI Python bindings (from the unstripped debug build)"
 # optimized library; only the glue is generated here.
 cargo build -p llmtrim-uniffi
 lib=""
-for ext in so dylib dll; do
-    [ -f "$workspace_root/target/debug/libllmtrim_ffi.$ext" ] && { lib="$workspace_root/target/debug/libllmtrim_ffi.$ext"; break; }
+# Linux/macOS produce lib<name>.{so,dylib}; Windows produces <name>.dll (no `lib` prefix).
+for cand in "$workspace_root/target/debug/libllmtrim_ffi.so" \
+            "$workspace_root/target/debug/libllmtrim_ffi.dylib" \
+            "$workspace_root/target/debug/llmtrim_ffi.dll"; do
+    [ -f "$cand" ] && { lib="$cand"; break; }
 done
 [ -n "$lib" ] || { echo "error: no unstripped cdylib in target/debug/" >&2; exit 1; }
 cargo run -q --bin uniffi-bindgen -p llmtrim-uniffi -- \
     generate --library "$lib" --language python --out-dir "$work_dir/glue"
 
 echo "==> injecting glue and repacking wheel"
-python3 -m wheel unpack "$wheel" -d "$work_dir/unpacked"
+"$py" -m wheel unpack "$wheel" -d "$work_dir/unpacked"
 pkg_dir="$(ls -d "$work_dir"/unpacked/*/llmtrim_ffi 2>/dev/null | head -1 || true)"
 [ -n "$pkg_dir" ] || { echo "error: maturin wheel has no 'llmtrim_ffi' package dir — its layout changed; update this script" >&2; exit 1; }
 cp "$work_dir/glue/llmtrim_ffi.py" "$pkg_dir/__init__.py"
@@ -50,6 +56,6 @@ cp "$work_dir/glue/llmtrim_ffi.py" "$pkg_dir/__init__.py"
 root="$(dirname "$pkg_dir")"
 mkdir -p "$root/llmtrim"
 printf 'from llmtrim_ffi import compress, Provider, CompressOutput, LlmtrimError  # noqa: F401\n' > "$root/llmtrim/__init__.py"
-python3 -m wheel pack "$root" -d "$dist_dir"
+"$py" -m wheel pack "$root" -d "$dist_dir"
 
 echo "==> done: $(ls -t "$dist_dir"/llmtrim-*.whl | head -1)"

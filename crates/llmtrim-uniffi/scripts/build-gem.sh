@@ -17,24 +17,30 @@ workspace_root="$(cd "$(dirname "$0")/../../.." && pwd)"
 lib_dir="$pkg_dir/lib/llmtrim"
 cd "$workspace_root"
 
+# Linux/macOS produce lib<name>.{so,dylib}; Windows produces <name>.dll (no `lib` prefix).
+find_cdylib() {
+    for cand in "$1/libllmtrim_ffi.so" "$1/libllmtrim_ffi.dylib" "$1/llmtrim_ffi.dll"; do
+        [ -f "$cand" ] && { echo "$cand"; return; }
+    done
+}
+
 echo "==> generating UniFFI Ruby glue (from the unstripped debug build)"
 cargo build -p llmtrim-uniffi
-dbg=""
-for ext in so dylib dll; do [ -f "target/debug/libllmtrim_ffi.$ext" ] && { dbg="target/debug/libllmtrim_ffi.$ext"; break; }; done
+dbg="$(find_cdylib target/debug)"
 [ -n "$dbg" ] || { echo "error: no unstripped cdylib in target/debug/" >&2; exit 1; }
 cargo run -q --bin uniffi-bindgen -p llmtrim-uniffi -- generate --library "$dbg" --language ruby --out-dir "$lib_dir"
 
 echo "==> building the optimized cdylib to bundle"
 cargo build --release -p llmtrim-uniffi
-rel=""
-for ext in so dylib dll; do [ -f "target/release/libllmtrim_ffi.$ext" ] && { rel="target/release/libllmtrim_ffi.$ext"; break; }; done
+rel="$(find_cdylib target/release)"
 [ -n "$rel" ] || { echo "error: no release cdylib in target/release/" >&2; exit 1; }
-ext="${rel##*.}"
-cp "$rel" "$lib_dir/libllmtrim_ffi.$ext"
+base="$(basename "$rel")"
+cp "$rel" "$lib_dir/$base"
 
-echo "==> patching ffi_lib to load the bundled library"
-# Load the bundled lib by absolute path, using the host's library suffix at runtime.
-perl -i -pe "s{ffi_lib 'llmtrim_ffi'}{ffi_lib File.expand_path(\"libllmtrim_ffi.#{::FFI::Platform::LIBSUFFIX}\", __dir__)}" \
+echo "==> patching ffi_lib to load the bundled library ($base)"
+# Point ffi_lib at the bundled file by its exact name (platform-specific: libllmtrim_ffi.so
+# / .dylib on Unix, llmtrim_ffi.dll on Windows).
+perl -i -pe "s{ffi_lib 'llmtrim_ffi'}{ffi_lib File.expand_path('$base', __dir__)}" \
     "$lib_dir/llmtrim_ffi.rb"
 
 echo "==> gem build (platform: $(ruby -e 'puts Gem::Platform.local'))"
