@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-06-14
+
 ### Added
 - **Language bindings now expose the per-stage compression breakdown.** `CompressOutput`
   carries a `stages` list (one `StageReport` per pipeline stage: `name`, `applied`,
@@ -299,7 +301,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/fkiene/llmtrim/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/fkiene/llmtrim/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/fkiene/llmtrim/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/fkiene/llmtrim/compare/v0.1.6...v0.1.7
