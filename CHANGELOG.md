@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **Windows autostart no longer leaves a console window open.** The login Run-key entry
+  launched `serve --supervised` as a foreground console app, so Explorer opened a terminal
+  that stayed visible for the daemon's whole life. The entry now passes `--hide-console`,
+  which hides the process's own console at startup, so the interceptor runs windowless at
+  login. Re-run `llmtrim setup` (or `llmtrim autostart`) to rewrite the entry.
 - **Python package now carries its README on PyPI.** The wheel set a summary but no long
   description, so the PyPI project page showed "no project description". `pyproject.toml`
   now points `readme` at the binding README.

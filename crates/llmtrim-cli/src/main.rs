@@ -119,6 +119,10 @@ enum Commands {
         /// Internal: run with crash-restart supervision (used by `start`/autostart).
         #[arg(long, hide = true)]
         supervised: bool,
+        /// Internal: hide the console window at startup (used by the Windows autostart
+        /// Run-key entry, which Explorer would otherwise launch with a visible console).
+        #[arg(long, hide = true)]
+        hide_console: bool,
     },
     /// Set everything up and start saving (CA, environment, autostart, daemon)
     ///
@@ -414,7 +418,14 @@ fn run() -> Result<()> {
 
             println!("{response}");
         }
-        Commands::Serve { port, supervised } => {
+        Commands::Serve {
+            port,
+            supervised,
+            hide_console,
+        } => {
+            if hide_console {
+                llmtrim::autostart::hide_console_window();
+            }
             if supervised {
                 llmtrim::serve::run_supervised(port)?;
             } else {

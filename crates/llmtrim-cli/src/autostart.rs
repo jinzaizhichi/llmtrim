@@ -25,6 +25,35 @@ pub fn configure(enable: bool, port: u16) -> Result<()> {
     }
 }
 
+/// Hide the process's own console window. Used by the Windows autostart Run-key entry: Explorer
+/// launches our console binary at login and allocates a console window that would otherwise stay
+/// visible for the daemon's whole life. We hide it (`SW_HIDE`) right at startup so login starts
+/// the interceptor windowless. No-op on non-Windows, where login uses a detached launchd agent /
+/// `.desktop` entry that never gets a terminal in the first place.
+pub fn hide_console_window() {
+    #[cfg(windows)]
+    {
+        // Minimal Win32 FFI (no extra dep): GetConsoleWindow (kernel32) + ShowWindow (user32).
+        const SW_HIDE: i32 = 0;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> isize;
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
+        }
+        // SAFETY: both are plain Win32 calls with no memory ownership. GetConsoleWindow returns
+        // 0 when there's no console attached, in which case ShowWindow(0, ..) is a harmless no-op.
+        unsafe {
+            let hwnd = GetConsoleWindow();
+            if hwnd != 0 {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+}
+
 /// Is run-at-login currently enabled? Read-only probe for `status`/`doctor` — checks the
 /// same canonical location `configure` writes (HKCU Run key / XDG desktop entry / launchd
 /// agent). `false` on any read failure: a probe must never error a status report.
@@ -85,7 +114,14 @@ fn configure_windows(enable: bool, port: u16) -> Result<()> {
         let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
             .create_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)
             .with_context(|| format!("failed to open HKCU\\{RUN_KEY}"))?;
-        let cmd = format!("\"{}\" serve --port {} --supervised", exe.display(), port);
+        // `--hide-console`: Explorer launches this console exe at login, allocating a visible
+        // console window that would otherwise stay open for the daemon's whole life. The flag
+        // makes the process hide its own console at startup (see `hide_console_window`).
+        let cmd = format!(
+            "\"{}\" serve --port {} --supervised --hide-console",
+            exe.display(),
+            port
+        );
         key.set_value(VALUE_NAME, &cmd)
             .context("failed to set llmtrim autostart in the registry Run key")?;
         // Collapse to this single entry: remove any legacy auto-launch leftovers (the HKLM
