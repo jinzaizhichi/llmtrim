@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="llmtrim" width="140">
+  <img src="assets/logo.png" alt="llmtrim" width="450">
 </p>
 
 <h1 align="center">llmtrim</h1>
