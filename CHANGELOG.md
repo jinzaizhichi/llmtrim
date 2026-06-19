@@ -17,6 +17,18 @@ All notable changes to this project are documented here. The format follows
   allowed. Credentials in the URL are plaintext in the process environment — use a
   credential-free URL with OS-level auth where possible.
   Requested by @gkgoat1 ([#62](https://github.com/fkiene/llmtrim/issues/62)).
+- **`llmtrim-core` builds for C-toolchain-free targets (including WebAssembly).** The
+  tree-sitter grammars, the tiktoken BPE vocabs, and the `image` decoders are now optional
+  cargo features (`skeleton`, `tiktoken`, `multimodal`), all on by default, so default
+  builds are unchanged. A `--no-default-features` build drops them; without `tiktoken` the
+  estimate tokenizer is used (token counts become approximate, savings percentages
+  unchanged).
+- **WebAssembly/JS bindings, published to npm as `@llmtrim/js`.** A single
+  `compress(input, provider, preset)` call that returns the compressed body, per-stage
+  report, and token counts as a fully-typed object (TypeScript definitions are generated
+  via `tsify`, so consumers get a typed `CompressOutput`). It runs the engine in a browser,
+  Node, or a Cloudflare Worker with no network or filesystem access. (`@llmtrim/wasm` is an
+  alias for the same package.)
 
 ## [0.2.0] - 2026-06-18
 
