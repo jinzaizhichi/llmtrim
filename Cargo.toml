@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/llmtrim-core",
   "crates/llmtrim-cli",
+  "crates/llmtrim-ledger",
   "crates/llmtrim-uniffi",
   "crates/llmtrim-wasm",
 ]
