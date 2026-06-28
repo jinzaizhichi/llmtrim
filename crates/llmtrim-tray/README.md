@@ -4,7 +4,11 @@ A menu-bar / system-tray app that shows llmtrim's compression savings per agent
 (Claude Code, Codex, Gemini, OpenCode, ...). Click the tray icon for a popover
 with the aggregate savings, a per-agent breakdown, and a savings trend.
 
-Ships on macOS and Windows. Linux support is not planned for the initial release.
+![llmtrim tray popover](docs/popover.svg)
+
+Ships on macOS, Windows, and Linux (X11/Wayland via WebKitGTK and an AppIndicator
+tray). On Linux it needs `libwebkit2gtk-4.1` and `libayatana-appindicator3` at
+runtime.
 
 ## How it works
 
@@ -20,7 +24,20 @@ renders the snapshot it receives over Tauri IPC.
 
 The crate is excluded from the workspace `default-members`, so the main CI and a
 plain `cargo build` on Linux never try to compile Tauri. Its dedicated gate is
-`.github/workflows/tray.yml`, which builds it on macOS and Windows.
+`.github/workflows/tray.yml`, which builds it on macOS, Windows, and Linux.
+
+## How it ships
+
+`llmtrim-tray` is `publish = false`: it never goes to crates.io, and
+`cargo install llmtrim` does not build it (the published CLI keeps
+`unsafe_code = "forbid"`, which Tauri's macros can't satisfy). It rides the
+prebuilt channels instead. The release workflow builds it for five targets. On
+the four desktop targets (macOS x64/arm64, Windows x64/arm64) it goes next to the
+CLI in the same archive, so Homebrew, Scoop, and the npm platform packages all
+carry the tray. The fifth target, Linux x86_64, builds in its own job and ships
+as a standalone `llmtrim-tray-x86_64-unknown-linux-gnu.tar.gz` on the GitHub
+Release rather than bundled (musl can't link Tauri; WebKitGTK is a glibc runtime
+dependency).
 
 ## Develop
 

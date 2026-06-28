@@ -2,7 +2,7 @@ name: Tray app
 
 # The Tauri tray app is excluded from the workspace default-members, so the main
 # CI (ci.yml) never compiles it. This workflow is its dedicated gate: it builds
-# the app on the two platforms it ships to (macOS + Windows). It is deliberately
+# the app on the three platforms it ships to (macOS, Windows, Linux). It is deliberately
 # NOT a required status check and is wholly separate from release.yml, so a tray
 # failure can never block the crates.io / npm release of the core + CLI.
 on:
@@ -70,6 +70,17 @@ jobs:
         run: |
           npm ci
           npm run build
+      # The committed dist/ is what Homebrew compiles from (no Node step on the user's
+      # machine), so it must match a fresh build of src-ui/. Check on Linux only — one
+      # platform is enough and avoids CRLF false positives. Rebuilt dist uses stable,
+      # hash-free names (vite.config.ts), so a clean tree means it is in sync.
+      - name: Verify committed dist is fresh
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          git diff --exit-code -- dist || {
+            echo "committed dist/ is stale; run 'npm run build' in crates/llmtrim-tray and commit dist/"
+            exit 1
+          }
       - name: Rustfmt
         run: cargo fmt -p llmtrim-tray -- --check
       # No `-- -D warnings`: the crate's [lints.rust] warnings = "deny" already fails on

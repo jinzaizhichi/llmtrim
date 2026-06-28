@@ -19,6 +19,17 @@ export default defineConfig({
     modulePreload: { polyfill: false },
     assetsInlineLimit: 0,
     sourcemap: false,
+    // Stable, content-hash-free output names. dist/ is committed (Homebrew builds
+    // the tray from the source tarball with no Node step, and tauri-build embeds
+    // dist/ at compile time), so unhashed names keep the committed diff to the
+    // actual content change instead of a renamed file every build.
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/index.js",
+        chunkFileNames: "assets/[name].js",
+        assetFileNames: "assets/index[extname]",
+      },
+    },
   },
   clearScreen: false,
 });

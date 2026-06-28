@@ -1055,17 +1055,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52560adf09603e58c9a7ee1fe1dcb95a16927b17c127f0ac02d6e768a0e25bc1"
 
 [[package]]
-name = "ctrlc"
-version = "3.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
-dependencies = [
- "dispatch2",
- "nix",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2911,7 +2900,6 @@ dependencies = [
  "clap",
  "comfy-table",
  "crossterm 0.28.1",
- "ctrlc",
  "dotenvy",
  "http-body-util",
  "hudsucker",
@@ -2927,12 +2915,10 @@ dependencies = [
  "regex",
  "reqwest",
  "rmcp",
- "rusqlite",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "statrs",
- "terminal_size",
  "time",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -2984,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-ledger"
-version = "0.3.3-dev"
+version = "0.4.1-dev"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2997,7 +2983,7 @@ dependencies = [
 
 [[package]]
 name = "llmtrim-tray"
-version = "0.3.3-dev"
+version = "0.4.1-dev"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5791,16 +5777,6 @@ checksum = "c4790fc369d5a530f4b544b094e31388b9b3a37c0f4652ade4505945f5660d24"
 dependencies = [
  "new_debug_unreachable",
  "utf-8",
-]
-
-[[package]]
-name = "terminal_size"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
-dependencies = [
- "rustix 1.1.4",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -148,12 +148,12 @@ fn llmtrim_binary() -> std::path::PathBuf {
     } else {
         "llmtrim"
     };
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join(name);
-            if sibling.is_file() {
-                return sibling;
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join(name);
+        if sibling.is_file() {
+            return sibling;
         }
     }
     std::path::PathBuf::from(name)
@@ -291,8 +291,7 @@ fn main() {
                 .build()?;
 
             let menu_app = app.handle().clone();
-            TrayIconBuilder::new()
-                .id("main")
+            TrayIconBuilder::with_id("main")
                 .icon(tray_icon)
                 // macOS template: the black glyph is auto-tinted per menu-bar theme.
                 .icon_as_template(cfg!(target_os = "macos"))
@@ -429,10 +428,10 @@ fn toggle_popover(app: &AppHandle) {
         // away first), don't re-open it — that would make a dismissing click a
         // no-op flicker.
         let state = app.state::<Arc<Mutex<TrayState>>>();
-        if let Some(t) = lock_state(&state).last_dismiss {
-            if t.elapsed() < DISMISS_DEBOUNCE {
-                return;
-            }
+        if let Some(t) = lock_state(&state).last_dismiss
+            && t.elapsed() < DISMISS_DEBOUNCE
+        {
+            return;
         }
         show_popover(app);
     }
