@@ -18,6 +18,9 @@
   --danger: #ff7a7a;
 
   --track: rgba(255, 255, 255, 0.07);
+  --footer-bg: rgba(11, 13, 18, 0.7);
+  --hero-glow: rgba(52, 224, 161, 0.1);
+  --accent-glow: rgba(52, 224, 161, 0.35);
 
   --r-card: 14px;
   --r-pill: 999px;
@@ -55,8 +58,36 @@ body {
   display: flex;
   flex-direction: column;
   background:
-    radial-gradient(120% 80% at 50% -10%, rgba(52, 224, 161, 0.1), transparent 60%),
+    radial-gradient(120% 80% at 50% -10%, var(--hero-glow), transparent 60%),
     var(--bg);
+}
+
+/* ---------- light theme ----------
+   The popover follows the OS appearance. Only the palette variables flip; every
+   rule below consumes them, so layout and the accent green stay identical. The
+   accent is deepened for AA contrast on white, and the glow is dialled back. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f6f9;
+    --surface: #ffffff;
+    --surface-hover: #eef1f6;
+    --border: rgba(17, 24, 39, 0.08);
+    --border-strong: rgba(17, 24, 39, 0.16);
+
+    --ink: #131722;
+    --ink-2: #49515f;
+    --ink-3: #717a8a;
+
+    --accent: #0ca678;
+    --accent-deep: #099268;
+    --accent-soft: rgba(12, 166, 120, 0.12);
+    --danger: #e03131;
+
+    --track: rgba(17, 24, 39, 0.08);
+    --footer-bg: rgba(255, 255, 255, 0.72);
+    --hero-glow: rgba(12, 166, 120, 0.12);
+    --accent-glow: rgba(12, 166, 120, 0.22);
+  }
 }
 
 /* ---------- header / hero ---------- */
@@ -78,7 +109,7 @@ body {
   height: 12px;
   border-radius: 4px;
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
-  box-shadow: 0 0 6px rgba(52, 224, 161, 0.35);
+  box-shadow: 0 0 6px var(--accent-glow);
 }
 
 .wordmark {
@@ -226,7 +257,7 @@ body {
   transform: scaleX(var(--fill, 0));
   border-radius: inherit;
   background: linear-gradient(90deg, var(--accent-deep), var(--accent));
-  box-shadow: 0 0 10px rgba(52, 224, 161, 0.35);
+  box-shadow: 0 0 10px var(--accent-glow);
   transition: transform 0.6s var(--ease);
 }
 
@@ -383,7 +414,7 @@ body {
   gap: 10px;
   padding: 10px 14px;
   border-top: 1px solid var(--border);
-  background: rgba(11, 13, 18, 0.7);
+  background: var(--footer-bg);
 }
 
 .countdown {
