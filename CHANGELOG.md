@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-04
+
 ### Fixed
 - **Prebuilt binaries and the desktop tray downloads ship again.** The 0.6.0 release
   built each archive with `--bin llmtrim-tray` but no matching `--package`, and the tray
@@ -700,7 +702,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/fkiene/llmtrim/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/fkiene/llmtrim/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/fkiene/llmtrim/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/fkiene/llmtrim/compare/v0.3.2...v0.4.0
