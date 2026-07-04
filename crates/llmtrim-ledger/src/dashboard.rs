@@ -36,6 +36,24 @@ pub struct AgentAggregate {
     pub has_savings_data: bool,
 }
 
+/// Drill-down rollup for one project (under an agent) or one session (under a
+/// project). Same metrics as `AgentAggregate`, plus a `key`/`label` pair.
+///
+/// `key` is the opaque value that round-trips the follow-up query (a raw project
+/// path, or a session id); the UI never displays it. `label` is the sanitised
+/// display string (a project basename, or a session name) — the only text shown.
+#[derive(Debug, Clone)]
+pub struct ChildAggregate {
+    pub key: String,
+    pub label: String,
+    pub input_before: i64,
+    pub input_after: i64,
+    pub bill_micros: i64,
+    pub cache_read: i64,
+    pub last_event_ts: Option<String>,
+    pub has_savings_data: bool,
+}
+
 /// One time bucket of gross per-agent savings, for the trend sparkline.
 #[derive(Debug, Clone)]
 pub struct PeriodSaved {
@@ -68,6 +86,23 @@ pub struct AgentCard {
     pub cache_read_tokens: i64,
     /// Raw saved_pct per period bucket, chronological; frontend scales for the sparkline.
     pub trend: Vec<f64>,
+    pub last_event_ts: Option<String>,
+}
+
+/// One drill-down row (project under an agent, or session under a project) sent
+/// to the tray frontend. Lazy-fetched only when the parent card is expanded.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChildCard {
+    /// Opaque round-trip key (raw project path / session id). NOT displayed.
+    pub key: String,
+    /// Display label (project basename / session name). The only text shown.
+    pub label: String,
+    pub input_before: i64,
+    pub input_after: i64,
+    pub saved_pct: f64,
+    pub has_savings_data: bool,
+    pub bill_micros: i64,
+    pub cache_read_tokens: i64,
     pub last_event_ts: Option<String>,
 }
 
@@ -230,6 +265,99 @@ impl BreakdownDb {
         rows.reverse();
         Ok(rows)
     }
+
+    /// Per-project aggregates under one `agent`, newest activity first.
+    ///
+    /// Drill-down level 2. `key` is the raw project path (round-trips into
+    /// `session_aggregates`); `label` is its basename. A NULL project (no
+    /// workspace) yields `key == ""` and the label `"(no project)"`.
+    pub fn project_aggregates(&self, agent: &str) -> Result<Vec<ChildAggregate>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT project,
+                        COALESCE(SUM(input_before), 0),
+                        COALESCE(SUM(input_after), 0),
+                        COALESCE(SUM(bill_micros), 0),
+                        COALESCE(SUM(cache_read), 0),
+                        MAX(ts),
+                        COUNT(input_before)
+                 FROM breakdown_turns
+                 WHERE agent = ?1
+                 GROUP BY project
+                 ORDER BY MAX(ts) DESC",
+            )
+            .context("failed to prepare project_aggregates query")?;
+        let rows = stmt
+            .query_map(params![agent], |r| {
+                let project: Option<String> = r.get(0)?;
+                let has_meter: i64 = r.get(6)?;
+                Ok(ChildAggregate {
+                    label: project_label(project.as_deref()),
+                    key: project.unwrap_or_default(),
+                    input_before: r.get(1)?,
+                    input_after: r.get(2)?,
+                    bill_micros: r.get(3)?,
+                    cache_read: r.get(4)?,
+                    last_event_ts: r.get(5)?,
+                    has_savings_data: has_meter > 0,
+                })
+            })
+            .context("failed to query project_aggregates")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect project_aggregates")
+    }
+
+    /// Per-session aggregates under one `agent`/`project`, newest activity first.
+    ///
+    /// Drill-down level 3 (leaf). `project` is the raw path from a `ChildCard.key`;
+    /// an empty string matches the NULL-project rows. `key` is the session id;
+    /// `label` is the human session name (falling back to the id, then a placeholder).
+    pub fn session_aggregates(&self, agent: &str, project: &str) -> Result<Vec<ChildAggregate>> {
+        // Empty key == the NULL-project bucket; `IS` is null-safe equality so one
+        // bound param covers both the NULL and the concrete-path case.
+        let project_param: Option<&str> = if project.is_empty() {
+            None
+        } else {
+            Some(project)
+        };
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_id,
+                        session_name,
+                        COALESCE(SUM(input_before), 0),
+                        COALESCE(SUM(input_after), 0),
+                        COALESCE(SUM(bill_micros), 0),
+                        COALESCE(SUM(cache_read), 0),
+                        MAX(ts),
+                        COUNT(input_before)
+                 FROM breakdown_turns
+                 WHERE agent = ?1 AND project IS ?2
+                 GROUP BY session_id
+                 ORDER BY MAX(ts) DESC",
+            )
+            .context("failed to prepare session_aggregates query")?;
+        let rows = stmt
+            .query_map(params![agent, project_param], |r| {
+                let id: Option<String> = r.get(0)?;
+                let name: Option<String> = r.get(1)?;
+                let has_meter: i64 = r.get(7)?;
+                Ok(ChildAggregate {
+                    label: session_label(name.as_deref(), id.as_deref()),
+                    key: id.unwrap_or_default(),
+                    input_before: r.get(2)?,
+                    input_after: r.get(3)?,
+                    bill_micros: r.get(4)?,
+                    cache_read: r.get(5)?,
+                    last_event_ts: r.get(6)?,
+                    has_savings_data: has_meter > 0,
+                })
+            })
+            .context("failed to query session_aggregates")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect session_aggregates")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +388,57 @@ fn title_case(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Display label for a project column value: its final path component, or
+/// `"(no project)"` when the workspace is NULL/empty. Uses `Path::file_name` so
+/// it works with both `/` and `\` separators; the raw path is never displayed.
+fn project_label(project: Option<&str>) -> String {
+    match project {
+        Some(p) if !p.is_empty() => std::path::Path::new(p)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string()),
+        _ => "(no project)".to_string(),
+    }
+}
+
+/// Display label for a session: the human name, falling back to the session id,
+/// then a placeholder when neither is present.
+fn session_label(name: Option<&str>, id: Option<&str>) -> String {
+    match name {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => match id {
+            Some(i) if !i.is_empty() => i.to_string(),
+            _ => "(unnamed session)".to_string(),
+        },
+    }
+}
+
+/// Pure transform: drill-down aggregates → serialisable `ChildCard`s. No DB, no
+/// Tauri; mirrors `build_dashboard`'s savings math for one nesting level.
+pub fn build_child_cards(aggregates: Vec<ChildAggregate>) -> Vec<ChildCard> {
+    aggregates
+        .into_iter()
+        .map(|a| {
+            let saved_pct = if a.has_savings_data {
+                gross_saved_pct(a.input_before, a.input_after)
+            } else {
+                0.0
+            };
+            ChildCard {
+                key: a.key,
+                label: a.label,
+                input_before: a.input_before,
+                input_after: a.input_after,
+                saved_pct,
+                has_savings_data: a.has_savings_data,
+                bill_micros: a.bill_micros,
+                cache_read_tokens: a.cache_read,
+                last_event_ts: a.last_event_ts,
+            }
+        })
+        .collect()
 }
 
 /// Gross savings percentage: max(0, before-after)/before*100; 0.0 when before <= 0.
@@ -881,5 +1060,198 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- drill-down: project / session aggregates ---
+
+    fn turn_in(
+        agent: &str,
+        project: Option<&str>,
+        session_id: &str,
+        session_name: Option<&str>,
+        before: i64,
+        after: i64,
+        bill: i64,
+    ) -> BreakdownTurn {
+        let mut t = metered_turn(agent, before, after, bill);
+        t.project = project.map(str::to_string);
+        t.session_id = session_id.to_string();
+        t.session_name = session_name.map(str::to_string);
+        t
+    }
+
+    fn seeded_turns(turns: &[BreakdownTurn]) -> BreakdownDb {
+        let tracker = Tracker::open_in_memory().expect("tracker");
+        for t in turns {
+            tracker.record_breakdown(t, &[]).expect("record");
+        }
+        BreakdownDb::from_connection(tracker.into_connection())
+    }
+
+    #[test]
+    fn project_aggregates_group_and_label_basename() {
+        let db = seeded_turns(&[
+            turn_in(
+                "claude-code",
+                Some("/home/u/web"),
+                "s1",
+                Some("a"),
+                1_000,
+                600,
+                10,
+            ),
+            turn_in(
+                "claude-code",
+                Some("/home/u/web"),
+                "s2",
+                Some("b"),
+                500,
+                400,
+                5,
+            ),
+            turn_in(
+                "claude-code",
+                Some("/home/u/api"),
+                "s3",
+                Some("c"),
+                200,
+                100,
+                2,
+            ),
+        ]);
+        let rows = db.project_aggregates("claude-code").expect("projects");
+        assert_eq!(rows.len(), 2);
+        let web = rows
+            .iter()
+            .find(|r| r.key == "/home/u/web")
+            .expect("web row");
+        // Label is the basename; the raw path is only in the opaque key.
+        assert_eq!(web.label, "web");
+        assert_eq!(web.input_before, 1_500);
+        assert_eq!(web.input_after, 1_000);
+        assert_eq!(web.bill_micros, 15);
+        assert!(web.has_savings_data);
+    }
+
+    #[test]
+    fn project_aggregates_null_project_is_no_project_bucket() {
+        let db = seeded_turns(&[turn_in(
+            "claude-code",
+            None,
+            "s1",
+            Some("only"),
+            300,
+            120,
+            3,
+        )]);
+        let rows = db.project_aggregates("claude-code").expect("projects");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "");
+        assert_eq!(rows[0].label, "(no project)");
+    }
+
+    #[test]
+    fn session_aggregates_scoped_to_agent_and_project() {
+        let db = seeded_turns(&[
+            turn_in(
+                "claude-code",
+                Some("/home/u/web"),
+                "s1",
+                Some("morning"),
+                1_000,
+                600,
+                10,
+            ),
+            turn_in(
+                "claude-code",
+                Some("/home/u/web"),
+                "s1",
+                Some("morning"),
+                400,
+                300,
+                4,
+            ),
+            turn_in(
+                "claude-code",
+                Some("/home/u/api"),
+                "s9",
+                Some("elsewhere"),
+                999,
+                1,
+                9,
+            ),
+        ]);
+        let rows = db
+            .session_aggregates("claude-code", "/home/u/web")
+            .expect("sessions");
+        assert_eq!(rows.len(), 1, "only the web project's session");
+        assert_eq!(rows[0].key, "s1");
+        assert_eq!(rows[0].label, "morning");
+        assert_eq!(rows[0].input_before, 1_400);
+        assert_eq!(rows[0].input_after, 900);
+    }
+
+    #[test]
+    fn session_aggregates_empty_project_matches_null_bucket() {
+        let db = seeded_turns(&[
+            turn_in("claude-code", None, "s1", Some("noproj"), 500, 250, 5),
+            turn_in(
+                "claude-code",
+                Some("/home/u/web"),
+                "s2",
+                Some("web"),
+                100,
+                90,
+                1,
+            ),
+        ]);
+        let rows = db.session_aggregates("claude-code", "").expect("sessions");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "noproj");
+        assert_eq!(rows[0].input_before, 500);
+    }
+
+    #[test]
+    fn build_child_cards_computes_saved_pct() {
+        let aggs = vec![ChildAggregate {
+            key: "/home/u/web".into(),
+            label: "web".into(),
+            input_before: 1_000,
+            input_after: 600,
+            bill_micros: 10,
+            cache_read: 42,
+            last_event_ts: Some("2024-01-01T00:00:00Z".into()),
+            has_savings_data: true,
+        }];
+        let cards = build_child_cards(aggs);
+        assert_eq!(cards.len(), 1);
+        assert!((cards[0].saved_pct - 40.0).abs() < 1e-9);
+        assert_eq!(cards[0].cache_read_tokens, 42);
+        assert_eq!(cards[0].label, "web");
+    }
+
+    #[test]
+    fn build_child_cards_premeter_has_zero_pct() {
+        let aggs = vec![ChildAggregate {
+            key: "k".into(),
+            label: "l".into(),
+            input_before: 0,
+            input_after: 0,
+            bill_micros: 0,
+            cache_read: 0,
+            last_event_ts: None,
+            has_savings_data: false,
+        }];
+        let cards = build_child_cards(aggs);
+        assert_eq!(cards[0].saved_pct, 0.0);
+        assert!(!cards[0].has_savings_data);
+    }
+
+    #[test]
+    fn session_label_falls_back_to_id_then_placeholder() {
+        assert_eq!(session_label(Some("named"), Some("id")), "named");
+        assert_eq!(session_label(None, Some("id")), "id");
+        assert_eq!(session_label(Some(""), Some("")), "(unnamed session)");
+        assert_eq!(session_label(None, None), "(unnamed session)");
     }
 }

@@ -15,6 +15,22 @@ export interface AgentCard {
   last_event_ts: string | null;
 }
 
+// One drill-down row (project under an agent, or session under a project),
+// lazy-fetched via `get_agent_projects` / `get_project_sessions`. `key` is an
+// opaque round-trip value (raw project path / session id) — never displayed;
+// `label` is the only text shown.
+export interface ChildCard {
+  key: string;
+  label: string;
+  input_before: number;
+  input_after: number;
+  saved_pct: number;
+  has_savings_data: boolean;
+  bill_micros: number;
+  cache_read_tokens: number;
+  last_event_ts: string | null;
+}
+
 export interface DashboardTotals {
   input_before: number;
   input_after: number;

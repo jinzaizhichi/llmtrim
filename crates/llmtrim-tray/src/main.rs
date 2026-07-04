@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use llmtrim_ledger::breakdown_db::BreakdownDb;
-use llmtrim_ledger::dashboard::{Dashboard, build_dashboard, parse_period, sanitise_error};
+use llmtrim_ledger::dashboard::{
+    ChildCard, Dashboard, build_child_cards, build_dashboard, parse_period, sanitise_error,
+};
 use llmtrim_ledger::tracking::{Period, db_path};
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem};
@@ -109,6 +111,45 @@ fn get_agent_trend(agent: String, period: String) -> Result<Vec<f64>, String> {
         "failed to query trend data".to_string()
     })?;
     Ok(trend.into_iter().map(|b| b.saved_pct).collect())
+}
+
+/// Drill-down level 2: the projects under one agent, lazy-fetched when its card
+/// is expanded. Opens the ledger read-only; a not-yet-initialised ledger returns
+/// an empty list rather than an error (same empty-state rule as the dashboard).
+#[tauri::command]
+fn get_agent_projects(agent: String) -> Result<Vec<ChildCard>, String> {
+    child_cards(|db| db.project_aggregates(&agent))
+}
+
+/// Drill-down level 3 (leaf): the sessions under one agent/project. `project` is
+/// the opaque `key` from a project `ChildCard` (empty string == the no-project bucket).
+#[tauri::command]
+fn get_project_sessions(agent: String, project: String) -> Result<Vec<ChildCard>, String> {
+    child_cards(|db| db.session_aggregates(&agent, &project))
+}
+
+/// Shared body for the two drill-down commands: resolve the ledger path, open it
+/// read-only (empty list when not initialised), run `query`, build the cards.
+/// Every failure is logged in full and mapped to a path-free string for the webview.
+fn child_cards(
+    query: impl FnOnce(&BreakdownDb) -> anyhow::Result<Vec<llmtrim_ledger::dashboard::ChildAggregate>>,
+) -> Result<Vec<ChildCard>, String> {
+    let path = db_path().map_err(|e| {
+        eprintln!("llmtrim-tray: db_path failed: {e:#}");
+        "could not resolve ledger path".to_string()
+    })?;
+    let Some(db) = BreakdownDb::open_readonly_if_ready(&path).map_err(|e| {
+        eprintln!("llmtrim-tray: open_readonly_if_ready failed: {e:#}");
+        sanitise_error(&e)
+    })?
+    else {
+        return Ok(Vec::new());
+    };
+    let aggregates = query(&db).map_err(|e| {
+        eprintln!("llmtrim-tray: drill-down query failed: {e:#}");
+        "failed to load breakdown data".to_string()
+    })?;
+    Ok(build_child_cards(aggregates))
 }
 
 /// Update the poll interval for the background refresh loop.
@@ -282,6 +323,14 @@ fn set_proxy_autostart(enable: bool) -> Result<(), String> {
     }
 }
 
+/// Whether the proxy is currently running, so Settings can show a single
+/// Start/Stop button matching the live state. Reads the same authoritative
+/// `status --json` `daemon.running` flag the tray menu uses.
+#[tauri::command]
+fn get_proxy_running() -> bool {
+    proxy_running()
+}
+
 // ---------------------------------------------------------------------------
 // Application setup
 // ---------------------------------------------------------------------------
@@ -446,6 +495,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
             get_agent_trend,
+            get_agent_projects,
+            get_project_sessions,
             set_poll_interval,
             start_proxy,
             stop_proxy,
@@ -453,6 +504,7 @@ fn main() {
             set_tray_autostart,
             get_proxy_autostart,
             set_proxy_autostart,
+            get_proxy_running,
             quit,
         ])
         .build(tauri::generate_context!())

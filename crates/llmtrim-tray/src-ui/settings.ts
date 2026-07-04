@@ -153,18 +153,21 @@ export function createSettingsView(
     "set_tray_autostart",
   );
 
-  // --- proxy controls ---
+  // --- proxy control: one button that flips Start/Stop to match live state ---
   const proxyStatus = el("p", { class: "row-status", "aria-live": "polite" });
   proxyStatus.hidden = true;
 
-  const startBtn = el(
-    "button",
-    { class: "set-btn set-btn-accent", type: "button" },
-    ["Start proxy"],
-  ) as HTMLButtonElement;
-  const stopBtn = el("button", { class: "set-btn", type: "button" }, [
-    "Stop proxy",
+  // `running` is refreshed from `get_proxy_running` each time the view opens and
+  // after every start/stop, so the button always offers the opposite action.
+  let running = false;
+  const proxyBtn = el("button", { class: "set-btn set-btn-accent", type: "button" }, [
+    "Start proxy",
   ]) as HTMLButtonElement;
+
+  function renderProxyBtn(): void {
+    proxyBtn.textContent = running ? "Stop proxy" : "Start proxy";
+    proxyBtn.classList.toggle("set-btn-accent", !running);
+  }
 
   function flash(message: string, isError: boolean): void {
     proxyStatus.textContent = message;
@@ -172,35 +175,46 @@ export function createSettingsView(
     proxyStatus.hidden = false;
   }
 
-  async function runProxy(
-    btn: HTMLButtonElement,
-    cmd: "start_proxy" | "stop_proxy",
-    ok: string,
-  ): Promise<void> {
-    btn.disabled = true;
+  // Lock the button while a start/stop is in flight so a double-click can't race.
+  // `aria-busy` announces the pending state to assistive tech.
+  async function toggleProxy(): Promise<void> {
+    if (proxyBtn.disabled) return;
+    const cmd = running ? "stop_proxy" : "start_proxy";
+    const ok = running ? "Proxy stopped." : "Proxy started.";
+    proxyBtn.disabled = true;
+    proxyBtn.classList.add("is-busy");
+    proxyBtn.setAttribute("aria-busy", "true");
     try {
       await invoke(cmd);
+      running = !running;
       flash(ok, false);
     } catch (e) {
       flash(errorMessage(e), true);
     } finally {
-      btn.disabled = false;
+      proxyBtn.classList.remove("is-busy");
+      proxyBtn.removeAttribute("aria-busy");
+      proxyBtn.disabled = false;
+      renderProxyBtn();
     }
   }
 
-  startBtn.addEventListener("click", () =>
-    void runProxy(startBtn, "start_proxy", "Proxy started."),
-  );
-  stopBtn.addEventListener("click", () =>
-    void runProxy(stopBtn, "stop_proxy", "Proxy stopped."),
-  );
+  proxyBtn.addEventListener("click", () => void toggleProxy());
+
+  async function refreshProxy(): Promise<void> {
+    try {
+      running = await invoke<boolean>("get_proxy_running");
+    } catch {
+      running = false; // safe default: offer Start
+    }
+    renderProxyBtn();
+  }
 
   const proxyGroup = el("section", { class: "set-group" }, [
     el("span", { class: "row-title" }, ["Proxy"]),
     el("span", { class: "row-hint" }, [
       "Run the local llmtrim proxy on this machine.",
     ]),
-    el("div", { class: "set-btn-row" }, [startBtn, stopBtn]),
+    el("div", { class: "set-btn-row" }, [proxyBtn]),
     proxyStatus,
   ]);
 
@@ -240,7 +254,11 @@ export function createSettingsView(
 
   async function refresh(): Promise<void> {
     proxyStatus.hidden = true;
-    await Promise.all([proxyAutostart.refresh(), trayAutostart.refresh()]);
+    await Promise.all([
+      refreshProxy(),
+      proxyAutostart.refresh(),
+      trayAutostart.refresh(),
+    ]);
   }
 
   return { root, refresh };

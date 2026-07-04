@@ -180,6 +180,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 11px;
+  /* The whole card summary toggles the drill-down (see card.ts). */
+  cursor: pointer;
   transition:
     background 0.18s var(--ease),
     border-color 0.18s var(--ease),
@@ -214,9 +216,30 @@ body {
 
 .card-head {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
   gap: 8px;
+  width: 100%;
+  /* It's a <button>: strip the native chrome, keep it a plain row. */
+  appearance: none;
+  border: none;
+  background: none;
+  margin: -4px -6px 0;
+  padding: 4px 6px;
+  border-radius: 9px;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.14s var(--ease);
+}
+
+.card-head:hover {
+  background: var(--surface-hover);
+}
+
+.card-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .card-name {
@@ -761,6 +784,37 @@ body {
   cursor: default;
 }
 
+/* Busy button keeps full contrast (it's the one working) and shows a spinner. */
+.set-btn.is-busy {
+  opacity: 1;
+  position: relative;
+  color: transparent;
+}
+
+.set-btn.is-busy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  color: var(--ink);
+  animation: set-btn-spin 0.6s linear infinite;
+}
+
+.set-btn-accent.is-busy::after {
+  color: #05140f;
+}
+
+@keyframes set-btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .set-btn-accent {
   color: #05140f;
   background: var(--accent);
@@ -770,6 +824,164 @@ body {
 .set-btn-accent:hover:not(:disabled) {
   background: var(--accent-deep);
   border-color: var(--accent-deep);
+}
+
+/* ---------- drill-down: agent -> project -> session ---------- */
+
+.card-name {
+  margin-right: auto;
+}
+
+/* Caret is a pure affordance now; the whole row (button) owns the click and the
+   aria-expanded state, so rotation is driven by the parent, not the caret. */
+.card-caret,
+.tree-caret {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--ink-3);
+  transition: transform 0.2s var(--ease), color 0.14s var(--ease);
+}
+
+.card-head[aria-expanded="true"] .card-caret,
+.tree-row-toggle[aria-expanded="true"] .tree-caret {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+
+/* Leaf (session) rows reserve the caret's width so labels stay aligned. */
+.tree-caret-empty {
+  visibility: hidden;
+}
+
+/* Animated disclosure region: grid 0fr -> 1fr expands smoothly without a
+   fixed height. Content lives in .tree-children-inner (overflow-clipped). */
+.tree-children {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.24s var(--ease);
+  /* Rows own their own affordance; only toggle rows are clickable. */
+  cursor: default;
+}
+
+.tree-children.is-open {
+  grid-template-rows: 1fr;
+}
+
+.tree-children-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* First level (agent -> projects) is separated from the summary above it. */
+.card > .tree-children.is-open {
+  margin-top: 8px;
+}
+.card > .tree-children > .tree-children-inner {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+/* Nested levels (project -> sessions) get a guide rail so the hierarchy reads. */
+.tree-node .tree-children .tree-children-inner {
+  margin-left: 11px;
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font: inherit;
+  text-align: left;
+}
+
+/* Expandable rows are buttons; make the whole row the hit target. */
+.tree-row-toggle {
+  appearance: none;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.14s var(--ease);
+}
+
+.tree-row-toggle:hover {
+  background: var(--surface-hover);
+}
+
+.tree-row-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tree-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+/* Sessions (leaves) sit one rung quieter than the projects above them. */
+.tree-row-leaf .tree-label {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.tree-metrics {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.tree-pct {
+  min-width: 34px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.tree-pct.is-empty {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.tree-bill {
+  min-width: 56px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-when {
+  min-width: 48px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-hint {
+  font-size: 12px;
+  color: var(--ink-3);
+  padding: 6px 8px;
+}
+.tree-error {
+  color: var(--danger);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -782,7 +994,12 @@ body {
   .set-back,
   .set-btn,
   .switch-track,
-  .switch-thumb {
+  .switch-thumb,
+  .card-head,
+  .card-caret,
+  .tree-caret,
+  .tree-children,
+  .tree-row-toggle {
     animation: none;
     transition: none;
   }

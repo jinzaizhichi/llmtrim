@@ -10,11 +10,16 @@
     "core:window:allow-is-visible",
     "allow-get-dashboard",
     "allow-get-agent-trend",
+    "allow-get-agent-projects",
+    "allow-get-project-sessions",
     "allow-set-poll-interval",
     "allow-start-proxy",
     "allow-stop-proxy",
     "allow-get-tray-autostart",
     "allow-set-tray-autostart",
+    "allow-get-proxy-autostart",
+    "allow-set-proxy-autostart",
+    "allow-get-proxy-running",
     "allow-quit"
   ]
 }
