@@ -339,6 +339,8 @@ pub enum PostAction {
     Update,
     /// `u` on a stale daemon — restart it (`llmtrim start --force`) to load the new binary.
     Restart,
+    /// `y` — launch the desktop tray (`llmtrim tray`); only offered when it's installed.
+    Tray,
 }
 
 struct App {
@@ -364,9 +366,12 @@ struct App {
     /// runs the SQLite queries off-thread and publishes a `DetailSnapshot`. `None` in tests,
     /// which build the Detail synchronously instead.
     detail_req: Option<std::sync::mpsc::Sender<String>>,
-    /// Set by `d`/`u` to a command to run after the TUI tears down (so it runs on the normal
+    /// Set by `d`/`u`/`y` to a command to run after the TUI tears down (so it runs on the normal
     /// screen, not inside the alt-screen).
     action: PostAction,
+    /// Whether the tray GUI is installed next to the CLI — gates the `y tray` action so the
+    /// hint never offers something that can't run. Resolved once at construction.
+    tray_available: bool,
 }
 
 impl App {
@@ -387,6 +392,7 @@ impl App {
             detail: None,
             detail_req: None,
             action: PostAction::None,
+            tray_available: crate::tray::tray_binary().is_some(),
         }
     }
 
@@ -460,6 +466,12 @@ impl App {
             // never move.
             KeyCode::Char('c') if self.tab == Tab::Overview => {
                 self.whole_prompt = !self.whole_prompt;
+            }
+            // `y` launches the desktop tray after teardown (like `d`/`u`), only when it's
+            // installed — otherwise the key is inert and the hint is hidden.
+            KeyCode::Char('y') if self.tray_available => {
+                self.action = PostAction::Tray;
+                return true;
             }
             KeyCode::Char('1') => self.tab = Tab::Overview,
             KeyCode::Char('2') => self.tab = Tab::Sessions,
@@ -626,7 +638,7 @@ impl App {
         }
         self.render_help(f, chunks[2]);
         if self.show_help {
-            render_help_overlay(f);
+            render_help_overlay(f, self.tray_available);
         }
     }
 
@@ -829,6 +841,9 @@ impl App {
         if update {
             keys.push_str(" · u update");
         }
+        if self.tray_available {
+            keys.push_str(" · y tray");
+        }
         keys.push_str(match self.tab {
             Tab::Overview => " · t theme · ? help · q quit",
             _ => " · t theme · q",
@@ -855,18 +870,19 @@ impl App {
     }
 }
 
-/// Centered full-screen keymap overlay, dismissed by any key.
-fn render_help_overlay(f: &mut Frame) {
+/// Centered full-screen keymap overlay, dismissed by any key. `tray` adds the
+/// tray launch line only when the desktop app is installed.
+fn render_help_overlay(f: &mut Frame, tray: bool) {
     let area = f.area();
     let w = 56.min(area.width);
-    let h = 20.min(area.height);
+    let h = (if tray { 21 } else { 20 }).min(area.height);
     let rect = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
         area.y + (area.height.saturating_sub(h)) / 2,
         w,
         h,
     );
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from("  Tab / Shift-Tab    next / previous tab"),
         Line::from("  1 / 2 / 3          jump to Overview / Sessions / Detail"),
@@ -878,11 +894,16 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  Esc                back to Sessions"),
         Line::from("  t                  cycle theme (Mocha/Macchiato/Frappé/Latte)"),
         Line::from("  c                  size %: new content / whole prompt (Overview)"),
+    ];
+    if tray {
+        lines.push(Line::from("  y                  open the desktop tray"));
+    }
+    lines.extend([
         Line::from(""),
         Line::from("  \"would have cost\" = the price at your provider's"),
         Line::from("   normal rate; \"you paid\" is after llmtrim trimmed it."),
         Line::from("  ? quit this help   q quit the app"),
-    ];
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2302,6 +2323,20 @@ mod tests {
                 "c must not toggle the basis off Overview"
             );
         }
+    }
+
+    #[test]
+    fn y_key_launches_the_tray_only_when_installed() {
+        // Not installed: `y` is inert and queues nothing.
+        let mut app = App::new(None, Duration::from_secs(2));
+        app.tray_available = false;
+        assert!(!app.handle_key(KeyCode::Char('y')));
+        assert_eq!(app.action, PostAction::None);
+
+        // Installed: `y` queues the tray launch and quits the TUI to run it.
+        app.tray_available = true;
+        assert!(app.handle_key(KeyCode::Char('y')));
+        assert_eq!(app.action, PostAction::Tray);
     }
 
     #[test]
