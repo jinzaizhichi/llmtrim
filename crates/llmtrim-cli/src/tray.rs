@@ -105,7 +105,9 @@ fn nudge_in(state_dir: &Path, tray_present: bool) -> Option<String> {
     }
     let _ = std::fs::create_dir_all(state_dir);
     let _ = std::fs::write(&marker, b"1\n");
-    Some("Desktop tray available: run `llmtrim tray` to watch savings in your menu bar.".to_string())
+    Some(
+        "Desktop tray available: run `llmtrim tray` to watch savings in your menu bar.".to_string(),
+    )
 }
 
 #[cfg(test)]
