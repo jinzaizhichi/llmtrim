@@ -239,6 +239,18 @@ impl Summary {
 /// metadata only (~100 bytes), so this bounds the file to roughly 10-15 MB.
 pub const DEFAULT_MAX_ROWS: i64 = 100_000;
 
+/// Retention cap for the per-source breakdown, in *turns*. A turn fans out into one
+/// `breakdown_blocks` row per source (hundreds in agent traffic), so the block table grows
+/// far faster than `compressions` and needs its own cap — reusing `DEFAULT_MAX_ROWS` here let
+/// the blocks table reach millions of rows and made `status --json` aggregate a
+/// multi-hundred-MB join on every call.
+///
+/// The expensive aggregate is now opt-in (`status --json --breakdown`), so the cap no longer
+/// governs the hot path — it only bounds disk. We keep it generous to preserve a long history
+/// for the breakdown TUI; the file scales with usage (heavy agent traffic at this cap can reach
+/// a few hundred MB to ~1 GB).
+pub const DEFAULT_MAX_BREAKDOWN_TURNS: i64 = 50_000;
+
 pub struct Tracker {
     conn: Connection,
 }
@@ -263,6 +275,10 @@ impl Tracker {
         // Bound the ledger on open: row cap + (if configured) age retention. The daemon
         // opens once and re-prunes periodically (see serve.rs); CLI paths prune per call.
         let _ = tracker.prune_default();
+        // Also bound the per-source breakdown here, not just in the daemon's write loop, so a
+        // restart immediately reclaims a table that grew unbounded under an older build (it
+        // checkpoints the WAL when it deletes). A no-op COUNT once the table is within cap.
+        let _ = tracker.prune_breakdown(Self::breakdown_turns_cap());
         Ok(tracker)
     }
 
@@ -455,11 +471,21 @@ impl Tracker {
         Ok(deleted)
     }
 
-    /// Prune with the default policy: the built-in row cap ([`DEFAULT_MAX_ROWS`]) plus the
-    /// configured age retention (`LLMTRIM_RETENTION_DAYS` env or `retention_days` in the
-    /// config file; `None` = age retention disabled, row cap only).
+    /// Prune with the default policy: the configured row cap (`LLMTRIM_MAX_ROWS` env or
+    /// `max_rows` in the config file, default [`DEFAULT_MAX_ROWS`]) plus the configured age
+    /// retention (`LLMTRIM_RETENTION_DAYS` env or `retention_days` in the config file;
+    /// `None` = age retention disabled, row cap only).
     pub fn prune_default(&self) -> Result<u64> {
-        self.prune(DEFAULT_MAX_ROWS, llmtrim_core::config::retention_days())
+        self.prune(
+            llmtrim_core::config::max_rows().unwrap_or(DEFAULT_MAX_ROWS),
+            llmtrim_core::config::retention_days(),
+        )
+    }
+
+    /// The configured per-source breakdown cap in turns (`LLMTRIM_MAX_BREAKDOWN_TURNS`
+    /// env or `max_breakdown_turns` in the config file) or [`DEFAULT_MAX_BREAKDOWN_TURNS`].
+    pub fn breakdown_turns_cap() -> i64 {
+        llmtrim_core::config::max_breakdown_turns().unwrap_or(DEFAULT_MAX_BREAKDOWN_TURNS)
     }
 
     pub fn record(&self, r: &Record) -> Result<()> {

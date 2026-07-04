@@ -486,6 +486,8 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
     "capture_max_mb",
     "breakdown_window",
     "retention_days",
+    "max_rows",
+    "max_breakdown_turns",
     "theme",
 ];
 
@@ -500,6 +502,10 @@ pub(crate) const RUNTIME_ONLY_KEYS: &[&str] = &[
 /// `LLMTRIM_HOME` (base dir resolved before config loads), `LLMTRIM_PROFILE` (dev timing
 /// toggle), `LLMTRIM_VERSION` (internal updater handoff). None are persistable user settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+// Constructed only inside this crate (`resolve`/`load`); every other crate just reads fields
+// off `RuntimeConfig::get()`. Marking it non-exhaustive keeps adding a new setting a
+// non-breaking change instead of tripping cargo-semver-checks' `constructible_struct_adds_field`.
+#[non_exhaustive]
 pub struct RuntimeConfig {
     /// Extra exact LLM-API hosts to intercept beyond the built-in registry. Env
     /// `LLMTRIM_EXTRA_HOSTS` (comma-separated) replaces the file `extra_hosts` array.
@@ -530,6 +536,14 @@ pub struct RuntimeConfig {
     /// Ledger age-retention in days (env `LLMTRIM_RETENTION_DAYS` / file `retention_days`);
     /// positive only (`None` = age retention off, row cap alone bounds the ledger).
     pub retention_days: Option<i64>,
+    /// Ledger row cap — most-recent N compression events kept (env `LLMTRIM_MAX_ROWS` / file
+    /// `max_rows`); positive only (`None` = use the built-in default).
+    pub max_rows: Option<i64>,
+    /// Retention cap for the per-source breakdown, in *turns* (env `LLMTRIM_MAX_BREAKDOWN_TURNS`
+    /// / file `max_breakdown_turns`); positive only (`None` = use the built-in default). A turn
+    /// fans out into many block rows, so this is the knob that governs breakdown-history depth
+    /// and on-disk size.
+    pub max_breakdown_turns: Option<i64>,
     /// Breakdown-TUI color theme (env `LLMTRIM_THEME` / file `theme`); a Catppuccin flavor
     /// name (`mocha`/`macchiato`/`frappe`/`latte`). The `t` key persists the user's choice
     /// here via [`save_theme`]. The TUI validates the name and falls back to its default.
@@ -600,6 +614,16 @@ impl RuntimeConfig {
                 env_set("LLMTRIM_RETENTION_DAYS")
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .or_else(|| fint("retention_days")),
+            ),
+            max_rows: positive(
+                env_set("LLMTRIM_MAX_ROWS")
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .or_else(|| fint("max_rows")),
+            ),
+            max_breakdown_turns: positive(
+                env_set("LLMTRIM_MAX_BREAKDOWN_TURNS")
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .or_else(|| fint("max_breakdown_turns")),
             ),
             theme: env_set("LLMTRIM_THEME").or_else(|| fstr("theme")),
         }
@@ -780,6 +804,16 @@ fn normalize_host(raw: &str) -> Option<String> {
 /// that only need this one value.
 pub fn retention_days() -> Option<i64> {
     RuntimeConfig::get().retention_days
+}
+
+/// Configured ledger row cap, or `None` to fall back to the caller's built-in default.
+pub fn max_rows() -> Option<i64> {
+    RuntimeConfig::get().max_rows
+}
+
+/// Configured breakdown retention cap (in turns), or `None` to fall back to the built-in default.
+pub fn max_breakdown_turns() -> Option<i64> {
+    RuntimeConfig::get().max_breakdown_turns
 }
 
 #[cfg(test)]
@@ -1014,7 +1048,9 @@ mod tests {
             no_update_check = false\n\
             bind = \"127.0.0.1\"\n\
             capture_max_mb = 10\n\
-            retention_days = 7\n";
+            retention_days = 7\n\
+            max_rows = 1000\n\
+            max_breakdown_turns = 100\n";
         let c = resolve_env(
             &[
                 ("LLMTRIM_UPSTREAM_PROXY", "http://env:8080"),
@@ -1024,6 +1060,8 @@ mod tests {
                 ("LLMTRIM_BIND", "0.0.0.0"),
                 ("LLMTRIM_CAPTURE_MAX_MB", "99"),
                 ("LLMTRIM_RETENTION_DAYS", "14"),
+                ("LLMTRIM_MAX_ROWS", "2000"),
+                ("LLMTRIM_MAX_BREAKDOWN_TURNS", "200"),
             ],
             file,
         );
@@ -1034,6 +1072,25 @@ mod tests {
         assert_eq!(c.bind.as_deref(), Some("0.0.0.0"));
         assert_eq!(c.capture_max_mb, Some(99));
         assert_eq!(c.retention_days, Some(14));
+        assert_eq!(c.max_rows, Some(2000));
+        assert_eq!(c.max_breakdown_turns, Some(200));
+    }
+
+    /// The two retention caps parse from env/file and reject non-positive values, like
+    /// `retention_days`.
+    #[test]
+    fn row_caps_parse_positive_only() {
+        assert_eq!(resolve_file("max_rows = 5000").max_rows, Some(5000));
+        assert_eq!(resolve_file("max_rows = 0").max_rows, None);
+        assert_eq!(resolve_file("max_rows = -1").max_rows, None);
+        assert_eq!(
+            resolve_file("max_breakdown_turns = 100000").max_breakdown_turns,
+            Some(100_000)
+        );
+        assert_eq!(
+            resolve_file("max_breakdown_turns = 0").max_breakdown_turns,
+            None
+        );
     }
 
     #[test]

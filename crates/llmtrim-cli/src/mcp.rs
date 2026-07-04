@@ -38,7 +38,7 @@ mod imp {
 
     use anyhow::{Context, Result};
     use rmcp::handler::server::wrapper::Parameters;
-    use rmcp::model::{CallToolResult, Content};
+    use rmcp::model::{CallToolResult, ContentBlock};
     use rmcp::{
         ErrorData as McpError, ServerHandler, ServiceExt, schemars, tool, tool_handler,
         tool_router, transport::stdio,
@@ -157,7 +157,7 @@ mod imp {
         }
 
         #[tool(
-            description = "Report recent savings from the local ledger: tokens trimmed, dollars saved, and a per-model breakdown. The same data the `llmtrim status --json` dashboard shows."
+            description = "Report recent savings from the local ledger: tokens trimmed and dollars saved. The same headline figures the `llmtrim status --json` dashboard shows."
         )]
         fn llmtrim_stats(
             &self,
@@ -165,7 +165,7 @@ mod imp {
         ) -> Result<CallToolResult, McpError> {
             let tracker = self.tracker().map_err(internal)?;
             let stats = crate::monitor::stats_json(&tracker, None).map_err(internal)?;
-            Ok(CallToolResult::success(vec![Content::text(stats)]))
+            Ok(CallToolResult::success(vec![ContentBlock::text(stats)]))
         }
     }
 
@@ -335,7 +335,7 @@ mod imp {
     }
 
     fn ok_json(payload: &Value) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             payload.to_string(),
         )]))
     }
