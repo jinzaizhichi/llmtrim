@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-06
+
 ### Added
 - **Anti-overthinking directive (`output_anti_overthink`).** On prose requests that explicitly
   declare both a quantized serving tier (OpenRouter `provider.quantizations`) and a reasoning
@@ -766,7 +768,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/fkiene/llmtrim/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/fkiene/llmtrim/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/fkiene/llmtrim/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/fkiene/llmtrim/compare/v0.6.1...v0.6.2
