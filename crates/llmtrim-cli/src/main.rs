@@ -399,23 +399,36 @@ enum SubCmd {
     On {
         /// Provider to route to: codex|kimi. Omit to re-enable the last provider used.
         provider: Option<String>,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Disable reroute (sets `sub = off`); traffic goes back to Anthropic with compression only.
     ///
     /// `sub stop` is an accepted alias.
     #[command(alias = "stop")]
-    Off,
+    Off {
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
+    },
     /// Set the reroute mode: `always` (reroute every turn) or `on-error` (only when Anthropic
     /// hits a usage/overload limit).
     Mode {
         /// `always` or `on-error`.
         mode: String,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Override the Codex reasoning effort on every rerouted request. By default the reroute honors
     /// the effort Claude Code asks for per turn; this forces one level instead (Kimi ignores it).
     Effort {
         /// `none` | `low` | `medium` | `high` | `xhigh` (`max` = `xhigh`).
         level: String,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Map one incoming model (a Claude tier `opus|sonnet|haiku|fable`, or an exact model id) to a
     /// provider model. Non-interactive form of `setup`, for scripts and the tray.
@@ -426,6 +439,9 @@ enum SubCmd {
         from: String,
         /// Provider model to route it to.
         to: String,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// Remove one mapping entry (falls back to the preset default for that model).
     Unmap {
@@ -433,6 +449,9 @@ enum SubCmd {
         provider: String,
         /// Incoming model or tier name to unmap.
         from: String,
+        /// Don't restart a running interceptor to apply the change (just print the hint).
+        #[arg(long)]
+        no_restart: bool,
     },
     /// List the provider's candidate models (for autocompletion). `--json` for machine output.
     Models {
@@ -664,23 +683,62 @@ fn run_auth(provider: &str, action: AuthAction) -> Result<()> {
 // No non-intercept `run_auth` stub: auth is only dispatched from `run_sub`'s `Auth` arm, which is
 // itself `#[cfg(feature = "intercept")]`, so a non-intercept build never references it.
 
-/// Report that reroute is now on, nudging to sign in only when there's no stored token.
+/// Report that reroute is now on, nudging to sign in only when there's no stored token. Returns
+/// whether a token is present: when it isn't, the caller skips the daemon restart (routing can't
+/// work until sign-in, so applying it now is pointless).
 #[cfg(feature = "intercept")]
-fn print_reroute_enabled(p: llmtrim::reroute::SubProvider) {
+fn print_reroute_enabled(p: llmtrim::reroute::SubProvider) -> bool {
     let logged_in =
         llmtrim::reroute::auth::auth_status_json(p)["logged_in"].as_bool() == Some(true);
     if logged_in {
-        println!(
-            "Reroute enabled: {}. Restart the proxy (`llmtrim start`) to apply.",
-            p.as_str()
-        );
+        println!("Reroute enabled: {}.", p.as_str());
     } else {
         println!(
-            "Reroute enabled: {}. Sign in with `llmtrim sub auth {} login`, then restart \
-             the proxy (`llmtrim start`).",
+            "Reroute enabled: {}. Sign in with `llmtrim sub auth {} login`, then \
+             `llmtrim start --force`.",
             p.as_str(),
             p.as_str()
         );
+    }
+    logged_in
+}
+
+/// Apply a `sub` config change to the interceptor. The daemon reads its config once at boot
+/// (`RuntimeConfig` is a `OnceLock`), so a running one keeps the old routing until restarted.
+/// Restarts it in place unless `no_restart` is set or nothing is running (the next `start` picks
+/// up the new config on its own).
+#[cfg(feature = "intercept")]
+fn apply_sub_change(no_restart: bool) {
+    let Some(state) = llmtrim::daemon::running() else {
+        return;
+    };
+    if no_restart {
+        println!("Restart to apply: `llmtrim start --force`.");
+        return;
+    }
+    let port = state.port;
+    let restarted = matches!(llmtrim::daemon::stop_and_wait_free(port), Ok(true))
+        .then(|| llmtrim::daemon::spawn_detached(port).ok())
+        .flatten();
+    match restarted {
+        Some(pid) => println!("↻ Restarted interceptor (pid {pid}) to apply."),
+        None => eprintln!(
+            "llmtrim: change saved, but the restart failed — run `llmtrim start --force`."
+        ),
+    }
+}
+
+/// Apply a per-provider mapping edit (`map`/`unmap`) for `edited`. Only restarts when `edited` is
+/// the provider reroute is currently pointed at — a change to some other provider's mapping is
+/// inert until you switch to it, so there's no reason to disturb a live session.
+#[cfg(feature = "intercept")]
+fn apply_sub_map_change(edited: llmtrim::reroute::SubProvider, no_restart: bool) {
+    let active = llmtrim_core::config::RuntimeConfig::get()
+        .sub
+        .as_deref()
+        .and_then(llmtrim::reroute::SubProvider::parse);
+    if active == Some(edited) {
+        apply_sub_change(no_restart);
     }
 }
 
@@ -704,8 +762,11 @@ fn run_sub(action: SubCmd) -> Result<()> {
                 anyhow::bail!("the mapping editor needs the `breakdown` feature")
             }
         }
-        SubCmd::On { provider } => {
-            match provider {
+        SubCmd::On {
+            provider,
+            no_restart,
+        } => {
+            let logged_in = match provider {
                 // Explicit provider: (re)write the default preset, as `use` always has.
                 Some(provider) => {
                     let p = parse(&provider)?;
@@ -719,7 +780,7 @@ fn run_sub(action: SubCmd) -> Result<()> {
                         }
                     }
                     llmtrim_core::config::write_sub_mapping(p.as_str(), &map)?;
-                    print_reroute_enabled(p);
+                    print_reroute_enabled(p)
                 }
                 // Bare `sub on`: restore the last provider, keeping its saved mapping.
                 None => {
@@ -730,17 +791,22 @@ fn run_sub(action: SubCmd) -> Result<()> {
                     })?;
                     let p = parse(&provider)?;
                     llmtrim_core::config::enable_sub(p.as_str())?;
-                    print_reroute_enabled(p);
+                    print_reroute_enabled(p)
                 }
+            };
+            // Skip the restart when signed out: routing can't work until sign-in anyway.
+            if logged_in {
+                apply_sub_change(no_restart);
             }
             Ok(())
         }
-        SubCmd::Off => {
+        SubCmd::Off { no_restart } => {
             llmtrim_core::config::disable_sub()?;
             println!("Reroute disabled — traffic goes to Anthropic (compression only).");
+            apply_sub_change(no_restart);
             Ok(())
         }
-        SubCmd::Mode { mode } => {
+        SubCmd::Mode { mode, no_restart } => {
             let on_error = match mode.trim().to_ascii_lowercase().as_str() {
                 "on-error" | "on_error" | "onerror" | "error" => true,
                 "always" | "all" => false,
@@ -748,51 +814,59 @@ fn run_sub(action: SubCmd) -> Result<()> {
             };
             llmtrim_core::config::write_sub_mode(on_error)?;
             println!(
-                "Reroute mode: {}. Restart the proxy (`llmtrim start`) to apply.",
+                "Reroute mode: {}.",
                 if on_error { "on-error" } else { "always" }
             );
+            apply_sub_change(no_restart);
             Ok(())
         }
-        SubCmd::Effort { level } => {
+        SubCmd::Effort { level, no_restart } => {
             let level = match level.trim().to_ascii_lowercase().as_str() {
                 "max" => "xhigh".to_string(),
                 l @ ("none" | "low" | "medium" | "high" | "xhigh") => l.to_string(),
                 other => anyhow::bail!("unknown effort '{other}' (none|low|medium|high|xhigh)"),
             };
             llmtrim_core::config::write_sub_effort(SubProvider::Codex.as_str(), &level)?;
-            println!(
-                "Codex reasoning effort: {level}. Restart the proxy (`llmtrim start`) to apply."
-            );
+            println!("Codex reasoning effort: {level}.");
             // Effort is Codex-only; if the active provider isn't Codex it's inert until you switch.
             let active = llmtrim_core::config::RuntimeConfig::get()
                 .sub
                 .as_deref()
                 .and_then(SubProvider::parse);
-            if active != Some(SubProvider::Codex) {
+            if active == Some(SubProvider::Codex) {
+                apply_sub_change(no_restart);
+            } else {
                 eprintln!(
                     "note: reroute is not on codex right now, so this effort has no effect until \
-                     `llmtrim sub use codex`."
+                     `llmtrim sub on codex`."
                 );
             }
             Ok(())
         }
-        SubCmd::Map { provider, from, to } => {
+        SubCmd::Map {
+            provider,
+            from,
+            to,
+            no_restart,
+        } => {
             let p = parse(&provider)?;
             llmtrim_core::config::write_sub_map_entry(p.as_str(), &from, &to)?;
-            println!(
-                "Mapped {from} -> {to} for {}. Restart the proxy (`llmtrim start`) to apply.",
-                p.as_str()
-            );
+            println!("Mapped {from} -> {to} for {}.", p.as_str());
+            apply_sub_map_change(p, no_restart);
             Ok(())
         }
-        SubCmd::Unmap { provider, from } => {
+        SubCmd::Unmap {
+            provider,
+            from,
+            no_restart,
+        } => {
             let p = parse(&provider)?;
             llmtrim_core::config::remove_sub_map_entry(p.as_str(), &from)?;
             println!(
-                "Unmapped {from} for {} (back to the preset default). Restart the proxy \
-                 (`llmtrim start`) to apply.",
+                "Unmapped {from} for {} (back to the preset default).",
                 p.as_str()
             );
+            apply_sub_map_change(p, no_restart);
             Ok(())
         }
         SubCmd::Models { provider, json } => {
