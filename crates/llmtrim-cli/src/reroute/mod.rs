@@ -300,7 +300,10 @@ pub fn resolve_model(
 
 /// The Codex models the ChatGPT backend actually accepts. A model outside this set 400s upstream;
 /// the caller can still send it (forward-compat) but the mapping editor picks from this list.
-pub const CODEX_MODELS: [&str; 6] = [
+pub const CODEX_MODELS: [&str; 9] = [
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
     "gpt-5.2",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
