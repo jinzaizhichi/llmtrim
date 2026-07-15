@@ -181,7 +181,7 @@ pub fn run(
     // the UI thread never runs a query for Detail.
     let detail_db = BreakdownDb::open().context("failed to open breakdown ledger")?;
     enable_raw_mode().context("failed to enter raw mode")?;
-    let _guard = TerminalGuard;
+    let guard = TerminalGuard;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
     // Buffer the backend so each frame is one write/flush instead of many small syscalls.
@@ -325,26 +325,39 @@ pub fn run(
     if let Err(e) = detail_worker.join() {
         eprintln!("llmtrim: breakdown detail thread panicked: {e:?}");
     }
-    Ok(app.action)
+    let action = app.action;
+    let pending_ensure = app.pending_ensure;
+    let pending_sub_login = app.pending_sub_login;
+    // Leave alt-screen before any normal stdout work (ensure / sub hints).
+    drop(terminal);
+    drop(guard);
+    if pending_ensure {
+        crate::ensure::run_cli(false)?;
+    }
+    if pending_sub_login {
+        let _ = crate::ensure::mark_sub_nudge_shown();
+        println!("Subscription setup: pick a provider, then log in.");
+        println!("  llmtrim sub auth codex login   # ChatGPT / Codex plan");
+        println!("  llmtrim sub auth kimi login    # Kimi coding plan");
+        println!("  llmtrim sub on codex           # enable after login");
+    }
+    Ok(action)
 }
 
 /// What the caller should do after the TUI exits — set by a key, run on the normal screen.
+///
+/// Keep the public variant set stable (semver): new TUI actions that only need work inside
+/// this crate are handled before returning (see `f` / sub-nudge keys).
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum PostAction {
     #[default]
     None,
     /// `d` — run `llmtrim doctor` (repair check).
     Doctor,
-    /// `f` — run `llmtrim ensure` (apply recommended integration fixes).
-    Fix,
     /// `u` — run `llmtrim update` (a newer release is available).
     Update,
     /// `u` on a stale daemon — restart it (`llmtrim start --force`) to load the new binary.
     Restart,
-    /// One-time sub onboarding: print login instructions.
-    SubLogin,
-    /// Dismiss the one-time sub onboarding nudge permanently.
-    SubDismiss,
 }
 
 struct App {
@@ -380,6 +393,10 @@ struct App {
     needs_ensure: bool,
     /// One-time subscription onboarding on the Overview tab.
     show_sub_nudge: bool,
+    /// Run `ensure` after the TUI tears down (alt-screen left). Keeps `PostAction` stable.
+    pending_ensure: bool,
+    /// Print sub login steps after the TUI tears down.
+    pending_sub_login: bool,
 }
 
 impl App {
@@ -403,6 +420,8 @@ impl App {
             tray_available: crate::tray::tray_binary().is_some(),
             needs_ensure: crate::ensure::needs_attention(),
             show_sub_nudge: crate::ensure::should_show_sub_nudge(),
+            pending_ensure: false,
+            pending_sub_login: false,
         }
     }
 
@@ -457,7 +476,8 @@ impl App {
                 return true;
             }
             KeyCode::Char('f') if self.needs_ensure => {
-                self.action = PostAction::Fix;
+                // Run ensure after alt-screen exit so `PostAction` stays semver-stable.
+                self.pending_ensure = true;
                 return true;
             }
             KeyCode::Char('u') => {
@@ -474,16 +494,16 @@ impl App {
                 };
                 return true;
             }
-            // One-time sub onboarding: `s` = show login steps, `n` = never again.
+            // One-time sub onboarding: `s` = show login steps (after exit), `n` = never again.
             KeyCode::Char('s') if self.show_sub_nudge && self.tab == Tab::Overview => {
-                self.action = PostAction::SubLogin;
                 self.show_sub_nudge = false;
+                self.pending_sub_login = true;
                 return true;
             }
             KeyCode::Char('n') if self.show_sub_nudge && self.tab == Tab::Overview => {
-                self.action = PostAction::SubDismiss;
                 self.show_sub_nudge = false;
-                return true;
+                let _ = crate::ensure::dismiss_sub_nudge();
+                return false;
             }
             // `c` flips the Overview gauge between "% of new content" and "% of the whole prompt"
             // — the one figure with two honest framings. It's a no-op on the other tabs, which

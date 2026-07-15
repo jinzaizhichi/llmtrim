@@ -2939,7 +2939,6 @@ fn run_monitor(
                     let report = llmtrim::doctor::gather();
                     print!("{}", llmtrim::doctor::render(ui::color_stdout(), &report));
                 }
-                PostAction::Fix => llmtrim::ensure::run_cli(false)?,
                 PostAction::Update => llmtrim::update::run()?,
                 PostAction::Restart => {
                     // Stale daemon: restart it onto the freshly-installed binary via the shared
@@ -2949,22 +2948,6 @@ fn run_monitor(
                         eprintln!("{e:#}");
                         std::process::exit(1);
                     }
-                }
-                PostAction::SubLogin => {
-                    println!(
-                        "{}",
-                        ui::note(
-                            ui::color_stdout(),
-                            "Subscription setup: pick a provider, then log in."
-                        )
-                    );
-                    println!("  llmtrim sub auth codex login   # ChatGPT / Codex plan");
-                    println!("  llmtrim sub auth kimi login    # Kimi coding plan");
-                    println!("  llmtrim sub on codex           # enable after login");
-                    let _ = llmtrim::ensure::mark_sub_nudge_shown();
-                }
-                PostAction::SubDismiss => {
-                    let _ = llmtrim::ensure::dismiss_sub_nudge();
                 }
                 PostAction::None => {}
             }

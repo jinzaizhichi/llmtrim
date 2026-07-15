@@ -303,6 +303,8 @@ fn live_exe() -> std::path::PathBuf {
 }
 
 /// After a successful binary-channel update: run `ensure -q` via the **new** binary.
+/// Only used on non-Windows (Unix curl installer); Windows prints the manual panel instead.
+#[cfg(not(windows))]
 fn post_update_ensure(color: bool) {
     println!(
         "{}",

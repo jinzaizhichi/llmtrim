@@ -38,8 +38,6 @@ pub struct State {
     pub log_path: Option<String>,
     /// Newer released version, if the (cached) update check knows one.
     pub update_available: Option<String>,
-    /// Integration gaps from [`crate::ensure::probe`] (label, detail).
-    pub integration_gaps: Vec<(String, String)>,
 }
 
 /// The finished diagnosis: checklist rows + how many are real problems (`⚠` rows;
@@ -100,12 +98,18 @@ pub fn gather() -> Report {
             .ok()
             .map(|p| p.display().to_string()),
         update_available: crate::update::check(false),
-        integration_gaps: crate::ensure::probe()
-            .into_iter()
-            .map(|g| (g.label, g.detail))
-            .collect(),
     };
-    build(&state)
+    let mut report = build(&state);
+    // Gaps are not part of the public `State` shape (semver); append after pure `build`.
+    for gap in crate::ensure::probe() {
+        report.rows.push((
+            ui::WARN,
+            gap.label.to_ascii_lowercase(),
+            format!("{} — fix: llmtrim ensure", gap.detail),
+        ));
+        report.problems += 1;
+    }
+    report
 }
 
 /// Turn probed state into checklist rows. Pure — the testable core of doctor.
@@ -286,15 +290,6 @@ pub fn build(s: &State) -> Report {
         ));
     }
 
-    // Claude Code integrations — gaps are WARN so doctor --fix / ensure is the remedy.
-    for (label, detail) in &s.integration_gaps {
-        rows.push((
-            ui::WARN,
-            label.to_ascii_lowercase(),
-            format!("{detail} — fix: llmtrim ensure"),
-        ));
-    }
-
     let problems = rows.iter().filter(|(g, _, _)| *g == ui::WARN).count();
     Report { rows, problems }
 }
@@ -347,7 +342,6 @@ mod tests {
             last_request: Some("4s ago".into()),
             log_path: Some("/home/u/.llmtrim/serve.log".into()),
             update_available: None,
-            integration_gaps: Vec::new(),
         }
     }
 
