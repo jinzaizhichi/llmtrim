@@ -516,7 +516,37 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         }
     }
 
-    // 3c. Claude Code's cold-cache guard. Offered only to Claude Code users (setup stays
+    // 3c. Claude Code compaction routing. Ask only on first configuration; re-running setup must
+    // never overwrite a customized order or a remembered opt-out. Scripted setup takes the
+    // recommended default, matching the tray's non-interactive default behavior.
+    let mut compact_changed = false;
+    if crate::statusline::claude_code_present()
+        && !llmtrim_core::config::compact_models_configured()
+    {
+        let want = force || confirm_compact_default_yes();
+        let models = if want {
+            vec!["haiku".to_string(), "sonnet".to_string()]
+        } else {
+            Vec::new()
+        };
+        match llmtrim_core::config::write_compact_models(&models) {
+            Ok(()) => {
+                compact_changed = true;
+                rows.push((
+                    ui::OK,
+                    "Compact".into(),
+                    if want {
+                        "Haiku → Sonnet → original model".into()
+                    } else {
+                        "original model only".into()
+                    },
+                ));
+            }
+            Err(e) => rows.push((ui::WARN, "Compact".into(), format!("not configured: {e}"))),
+        }
+    }
+
+    // 3d. Claude Code's cold-cache guard. Offered only to Claude Code users (setup stays
     //     client-agnostic otherwise), default on; `--force` / a non-interactive setup take that
     //     default without asking. Merges into `hooks.UserPromptSubmit` — other hooks are kept.
     if crate::statusline::claude_code_present() {
@@ -546,7 +576,7 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
     let daemon_ok = match &running {
         // `--force` falls through to the restart arm even on a matching port (e.g. to pick up a
         // freshly installed binary); without it a healthy same-port daemon is left untouched.
-        Some(state) if state.port == port && !force => {
+        Some(state) if state.port == port && !force && !compact_changed => {
             rows.push((
                 ui::OK,
                 "Interceptor".into(),
@@ -705,6 +735,22 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         println!("    gemini extensions uninstall caveman  # Gemini CLI");
     }
     Ok(())
+}
+
+/// Ask whether to route Claude Code compaction through cheaper models, defaulting to yes. A
+/// scripted setup takes the default without blocking on stdin.
+fn confirm_compact_default_yes() -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return true;
+    }
+    print!("Use cheaper models for Claude Code /compact (Haiku -> Sonnet -> original)? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
 /// Ask whether to enable the desktop tray, defaulting to yes. Returns `true`

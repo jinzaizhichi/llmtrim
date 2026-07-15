@@ -49,10 +49,25 @@ pub fn build_upstream(
     token: &auth::TokenSet,
     session_id: Option<&str>,
 ) -> Result<UpstreamRewrite> {
-    let incoming = anthropic_body
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    build_upstream_for_model(provider, anthropic_body, None, overrides, token, session_id)
+}
+
+/// Internal variant that resolves a compact candidate without changing the client-visible model in
+/// the Anthropic body. The public wrapper above retains its stable five-argument API.
+pub(crate) fn build_upstream_for_model(
+    provider: SubProvider,
+    anthropic_body: &Value,
+    logical_model: Option<&str>,
+    overrides: &BTreeMap<String, String>,
+    token: &auth::TokenSet,
+    session_id: Option<&str>,
+) -> Result<UpstreamRewrite> {
+    let incoming = logical_model.unwrap_or_else(|| {
+        anthropic_body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+    });
     let model = resolve_model(provider, incoming, overrides);
     let (host, path, body, headers) = match provider {
         SubProvider::Codex => {
