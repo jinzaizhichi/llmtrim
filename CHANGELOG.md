@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`llmtrim ensure`:** bring this machine to the recommended state. Installs or refreshes owned
+  Claude Code integrations (statusline, cold-cache guard, window-local `/sub`, default compact
+  model chain), tray login when the GUI binary is present, and restarts a version-skewed daemon.
+  Opt-outs live in `~/.llmtrim/integrations.json` so ensure does not re-enable after an explicit no.
+- **`llmtrim doctor --fix`** and status **`f`** run the same ensure path.
+- **Quiet auto-heal on `start` and status open** when the binary version advanced or owned pieces
+  look stale (no prompts; no network tray download; no first-time installs).
+- **Linux desktop tray one-shot download** during interactive ensure when the tray binary is
+  missing (optional; default off when non-interactive).
+- **One-time subscription onboarding in the status TUI** (`s` for login steps, `n` to dismiss)
+  when Claude Code is present and `sub` is not configured.
+
+### Changed
+
+- **`setup` and binary-channel `update` call ensure.** First install wires
+  statusline/guard/`/sub`/compact. Binary `update` restarts the daemon and runs `ensure -q` on the
+  new binary (never in-process after a self-replace). Package-manager channels print the package
+  command then a single `llmtrim ensure` follow-up.
+- **Owned Claude Code hooks and statusline rewrite in place** when the binary path or payload
+  (e.g. `refreshInterval`) changes. Quiet auto-heal only refreshes stale owned pieces and daemon
+  skew; it never first-installs integrations or enables tray login.
+- **Top-level help** leads with `setup` / `update` / `ensure` / `doctor`. Power-user
+  `statusline` / `guard` / `compact` stay available but are hidden from the main command list.
+- **Opt-outs stick:** `statusline` / `guard` / `window-sub` / `compact off` write
+  `integrations.json` opt-outs; corrupt state refuses auto-apply instead of resetting them.
+- **Safer hooks and tray install:** shell-quoted hook paths, atomic `settings.json` writes,
+  shared `CLAUDE_CONFIG_DIR`, arch-aware tray download via path-filtered tar into a temp dir,
+  then promote.
+
 ## [0.10.2] - 2026-07-15
 
 ### Added

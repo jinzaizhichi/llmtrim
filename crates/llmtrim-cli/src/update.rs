@@ -17,7 +17,9 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
 /// The "now restart the daemon onto the new binary" follow-up, shown after every channel's
 /// update instructions. One constant so the command and its comment stay in lockstep.
-const RESTART_HINT: &str = "llmtrim start --force    # restart the daemon on the new binary";
+/// Post-upgrade follow-up for package-manager channels: ensure restarts a skewed daemon and
+/// refreshes Claude Code integrations. Prefer this over a bare `start --force`.
+const ENSURE_HINT: &str = "llmtrim ensure           # restart daemon + refresh integrations";
 
 /// `owner/name` parsed from the crate's repository URL.
 fn repo() -> &'static str {
@@ -204,19 +206,19 @@ pub fn run() -> Result<()> {
     match channel() {
         Channel::Cargo => instructions(
             "update via cargo",
-            &["cargo install --locked llmtrim --force", RESTART_HINT],
+            &["cargo install --locked llmtrim --force", ENSURE_HINT],
         ),
         Channel::Homebrew => instructions(
             "update via Homebrew",
             &[
                 "brew tap fkiene/tap",
                 "brew upgrade fkiene/tap/llmtrim",
-                RESTART_HINT,
+                ENSURE_HINT,
             ],
         ),
         Channel::Npm => instructions(
             "update via npm",
-            &["npm install -g @llmtrim/cli@latest", RESTART_HINT],
+            &["npm install -g @llmtrim/cli@latest", ENSURE_HINT],
         ),
         Channel::Binary => {
             let tag = latest
@@ -231,7 +233,7 @@ pub fn run() -> Result<()> {
                         "iwr -useb https://raw.githubusercontent.com/{}/{tag}/install.ps1 | iex",
                         repo()
                     ),
-                    RESTART_HINT,
+                    ENSURE_HINT,
                 ],
             );
             #[cfg(not(windows))]
@@ -259,10 +261,13 @@ pub fn run() -> Result<()> {
                         crate::ui::panel(
                             color,
                             "update failed, finish it manually",
-                            &[manual_install_cmd(&url, &tag), RESTART_HINT.to_string()],
+                            &[manual_install_cmd(&url, &tag), ENSURE_HINT.to_string()],
                         )
                     );
                 };
+                // Installer runs setup (and may start the daemon). Pin NO_SETUP so we control
+                // restart + ensure from this process via the *new* on-disk binary.
+                cmd.env("LLMTRIM_NO_SETUP", "1");
                 let status = match cmd.status() {
                     Ok(s) => s,
                     Err(e) => {
@@ -278,15 +283,56 @@ pub fn run() -> Result<()> {
                 if let Some(v) = latest {
                     write_cache(&v); // clear the `monitor` banner
                 }
-                // The installer laid down the new binary, but the running daemon is still on
-                // the old one (Stale). Finish the job here so `update` leaves nothing behind —
-                // otherwise `status` would show a `u  Update` nudge for a restart the user must
-                // do by hand. Same path as the TUI's `u` (PostAction::Restart).
+                // Always finish on the new binary: in-process ensure would stamp the old
+                // CARGO_PKG_VERSION and rewrite Claude hooks with a ghost `(deleted)` path.
                 restart_daemon(color)?;
+                post_update_ensure(color);
             }
         }
     }
+    // Package-manager channels: the panel already ends with `llmtrim ensure`.
     Ok(())
+}
+
+/// Path to the on-disk llmtrim to spawn after a self-replacing install (never a deleted path).
+fn live_exe() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("llmtrim"))
+}
+
+/// After a successful binary-channel update: run `ensure -q` via the **new** binary.
+/// Only used on non-Windows (Unix curl installer); Windows prints the manual panel instead.
+#[cfg(not(windows))]
+fn post_update_ensure(color: bool) {
+    println!(
+        "{}",
+        crate::ui::paint(
+            color,
+            crate::ui::Tone::Dim,
+            "Syncing integrations on the new binary…"
+        )
+    );
+    let status = std::process::Command::new(live_exe())
+        .args(["ensure", "-q"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("{}", crate::ui::ok(color, "Integrations synced."));
+        }
+        Ok(_) => eprintln!(
+            "{}",
+            crate::ui::note(
+                color,
+                "ensure exited non-zero — run `llmtrim ensure` yourself."
+            )
+        ),
+        Err(e) => eprintln!(
+            "{}",
+            crate::ui::note(color, &format!("Could not run ensure: {e}"))
+        ),
+    }
 }
 
 /// Restart the daemon onto the freshly-installed binary via `start --force` (the documented
@@ -294,13 +340,6 @@ pub fn run() -> Result<()> {
 /// the installer) and the TUI's `PostAction::Restart` in `main.rs`, so the restart lives in one
 /// place. On failure it bails with an actionable message rather than leaving the user guessing.
 pub fn restart_daemon(color: bool) -> Result<()> {
-    // The installer replaces the binary on disk; on Linux `current_exe()` can then resolve to a
-    // `…/llmtrim (deleted)` ghost path. Fall back to `llmtrim` on PATH when the resolved path no
-    // longer exists, so the restart still lands on the freshly-installed binary.
-    let exe = std::env::current_exe()
-        .ok()
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("llmtrim"));
     println!(
         "\n{}",
         crate::ui::paint(
@@ -309,14 +348,22 @@ pub fn restart_daemon(color: bool) -> Result<()> {
             "Restarting the daemon on the new binary…"
         )
     );
-    let status = std::process::Command::new(exe)
+    restart_daemon_silent()
+}
+
+/// Same as [`restart_daemon`] without the chatter — used by [`crate::ensure`].
+pub fn restart_daemon_silent() -> Result<()> {
+    // The installer replaces the binary on disk; on Linux `current_exe()` can then resolve to a
+    // `…/llmtrim (deleted)` ghost path. Fall back to `llmtrim` on PATH when the resolved path no
+    // longer exists, so the restart still lands on the freshly-installed binary.
+    let status = std::process::Command::new(live_exe())
         .args(["start", "--force"])
         .status()
         .context("run llmtrim start --force")?;
     if !status.success() {
         anyhow::bail!(
             "daemon restart failed (llmtrim start --force exited non-zero). \
-             Restart it yourself with: llmtrim start --force"
+             Run: llmtrim ensure   (or llmtrim start --force)"
         );
     }
     Ok(())

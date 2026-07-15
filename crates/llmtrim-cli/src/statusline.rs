@@ -773,11 +773,52 @@ pub fn claude_code_present() -> bool {
         .unwrap_or(false)
 }
 
-fn claude_settings_path() -> Result<PathBuf> {
+/// Claude Code settings.json — honors `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub(crate) fn claude_settings_path() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join("settings.json"));
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .context("neither HOME nor USERPROFILE is set")?;
     Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+}
+
+/// Shell-safe single-quoted path for hook/statusline command strings (POSIX; Windows uses doubles).
+pub(crate) fn shell_quote_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("\"{}\"", path.replace('"', "\\\""))
+    }
+    #[cfg(not(windows))]
+    {
+        // POSIX: single-quote and break/reopen for embedded quotes.
+        format!("'{}'", path.replace('\'', "'\"'\"'"))
+    }
+}
+
+/// Absolute or stable PATH path to this llmtrim binary (no subcommand).
+pub fn stable_exe_string() -> String {
+    std::env::current_exe()
+        .ok()
+        .filter(|p| p.exists())
+        .map(|p| stable_executable_path(&p, std::env::var_os("PATH").as_deref()))
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "llmtrim".to_string())
+}
+
+/// Atomically write pretty JSON (temp in same dir + rename).
+pub(crate) fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(value)?)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename onto {}", path.display()))?;
+    Ok(())
 }
 
 /// Return a stable PATH alias for `current_exe` when one resolves to the same binary.
@@ -818,16 +859,7 @@ fn stable_executable_path(current_exe: &Path, path: Option<&OsStr>) -> PathBuf {
 /// stable PATH alias, so it survives a package manager replacing a versioned executable. Shared
 /// with [`crate::guard`], which writes a hook command the same way.
 pub(crate) fn exe_command(subcommand: &str) -> String {
-    let exe = std::env::current_exe()
-        .ok()
-        .map(|p| stable_executable_path(&p, std::env::var_os("PATH").as_deref()))
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "llmtrim".to_string());
-    if exe.contains(' ') {
-        format!("\"{exe}\" {subcommand}")
-    } else {
-        format!("{exe} {subcommand}")
-    }
+    format!("{} {subcommand}", shell_quote_path(&stable_exe_string()))
 }
 
 /// The `statusLine` object we write.
@@ -851,13 +883,21 @@ pub(crate) fn is_llmtrim_command(command: &str, subcommand: &str) -> bool {
     let Some(executable) = command.strip_suffix(&format!(" {subcommand}")) else {
         return false;
     };
-    let executable = executable.trim();
-    let executable = executable
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(executable);
+    let executable = unquote_path_token(executable.trim());
     let name = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
     name.strip_suffix(".exe").unwrap_or(name) == "llmtrim"
+}
+
+/// Strip one layer of shell quotes from a path token (double or single).
+pub(crate) fn unquote_path_token(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        return &s[1..s.len() - 1];
+    }
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        return &s[1..s.len() - 1];
+    }
+    s
 }
 
 /// Set our `statusLine` key on a parsed settings object, preserving every other key. Pure
@@ -899,8 +939,7 @@ pub fn install(print: bool) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&settings)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_settings(&path, &settings)?;
 
     println!(
         "Wired the llmtrim status line into {}. Restart Claude Code to see it.",
@@ -909,9 +948,97 @@ pub fn install(print: bool) -> Result<()> {
     Ok(())
 }
 
-/// Re-point an existing llmtrim-owned Claude statusline at the current binary. Only the
-/// `command` string is rewritten: a custom command is left alone, and so is any other key the
-/// user set on the `statusLine` object (`padding`, …). Returns whether anything changed.
+/// Ownership of the Claude Code `statusLine` key relative to this binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedStatus {
+    /// No `statusLine` key (or missing settings file).
+    Missing,
+    /// Ours, but command path or refreshInterval differs from what we would write now.
+    Stale,
+    /// Ours and matches the current payload.
+    Current,
+    /// Present but not an llmtrim statusline — leave it alone.
+    Foreign,
+}
+
+/// Whether ensure should install / refresh the status line.
+pub fn owned_status() -> OwnedStatus {
+    let Ok(path) = claude_settings_path() else {
+        return OwnedStatus::Missing;
+    };
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return OwnedStatus::Missing;
+    };
+    let Ok(settings) = serde_json::from_str::<Value>(&s) else {
+        return OwnedStatus::Missing;
+    };
+    owned_status_of(&settings)
+}
+
+fn owned_status_of(settings: &Value) -> OwnedStatus {
+    let Some(status_line) = settings.get("statusLine").and_then(Value::as_object) else {
+        return OwnedStatus::Missing;
+    };
+    let Some(command) = status_line.get("command").and_then(Value::as_str) else {
+        return OwnedStatus::Foreign;
+    };
+    if !is_llmtrim_statusline_command(command) {
+        return OwnedStatus::Foreign;
+    }
+    let desired = statusline_config();
+    let desired_cmd = desired.get("command").and_then(Value::as_str).unwrap_or("");
+    let desired_refresh = desired
+        .get("refreshInterval")
+        .and_then(Value::as_i64)
+        .unwrap_or(REFRESH_INTERVAL_SECS);
+    let refresh = status_line.get("refreshInterval").and_then(Value::as_i64);
+    if command == desired_cmd && refresh == Some(desired_refresh) {
+        OwnedStatus::Current
+    } else {
+        OwnedStatus::Stale
+    }
+}
+
+/// Outcome of [`sync_owned`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    Installed,
+    Refreshed,
+    AlreadyCurrent,
+    SkippedForeign,
+}
+
+/// Install or refresh our status line. Never overwrites a foreign custom status line.
+pub fn sync_owned() -> Result<SyncOutcome> {
+    let path = claude_settings_path()?;
+    let mut settings: Value = match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s)
+            .with_context(|| format!("{} is not valid JSON", path.display()))?,
+        Err(_) => Value::Object(Default::default()),
+    };
+    match owned_status_of(&settings) {
+        OwnedStatus::Foreign => Ok(SyncOutcome::SkippedForeign),
+        OwnedStatus::Current => Ok(SyncOutcome::AlreadyCurrent),
+        OwnedStatus::Missing => {
+            set_statusline(&mut settings, &path)?;
+            write_settings(&path, &settings)?;
+            Ok(SyncOutcome::Installed)
+        }
+        OwnedStatus::Stale => {
+            // Replace only our owned fields (command + refreshInterval); keep padding etc.
+            refresh_statusline_config(&mut settings)?;
+            write_settings(&path, &settings)?;
+            Ok(SyncOutcome::Refreshed)
+        }
+    }
+}
+
+fn write_settings(path: &Path, settings: &Value) -> Result<()> {
+    atomic_write_json(path, settings)
+}
+
+/// Re-point an existing llmtrim-owned Claude statusline at the current binary and ensure
+/// `refreshInterval` is set. A custom command is left alone. Returns whether anything changed.
 fn refresh_statusline_config(settings: &mut Value) -> Result<bool> {
     let Some(status_line) = settings
         .get_mut("statusLine")
@@ -926,36 +1053,49 @@ fn refresh_statusline_config(settings: &mut Value) -> Result<bool> {
         return Ok(false);
     }
 
-    let Some(current) = statusline_config()
+    let desired = statusline_config();
+    let desired_cmd = desired
         .get("command")
         .and_then(Value::as_str)
         .map(str::to_string)
-    else {
-        return Ok(false);
-    };
-    if current == command {
-        return Ok(false);
+        .unwrap_or_default();
+    let desired_refresh = desired
+        .get("refreshInterval")
+        .cloned()
+        .unwrap_or(Value::from(REFRESH_INTERVAL_SECS));
+
+    let mut changed = false;
+    if status_line.get("command").and_then(Value::as_str) != Some(desired_cmd.as_str()) {
+        status_line.insert("command".to_string(), Value::String(desired_cmd));
+        changed = true;
     }
-    status_line.insert("command".to_string(), Value::String(current));
-    Ok(true)
+    if status_line.get("refreshInterval") != Some(&desired_refresh) {
+        status_line.insert("refreshInterval".to_string(), desired_refresh);
+        changed = true;
+    }
+    Ok(changed)
 }
 
 /// Refresh an existing llmtrim-owned Claude statusline without touching custom commands.
 /// Returns whether the settings file was rewritten. This runs during `llmtrim update` before
-/// package managers can remove a versioned executable path.
+/// package managers can remove a versioned executable path. Does **not** install when missing.
 pub fn refresh_if_installed() -> Result<bool> {
-    let path = claude_settings_path()?;
-    let Ok(s) = std::fs::read_to_string(&path) else {
-        return Ok(false);
-    };
-    let mut settings: Value = serde_json::from_str(&s)
-        .with_context(|| format!("{} is not valid JSON", path.display()))?;
-    if !refresh_statusline_config(&mut settings)? {
-        return Ok(false);
+    match owned_status() {
+        OwnedStatus::Missing | OwnedStatus::Foreign | OwnedStatus::Current => Ok(false),
+        OwnedStatus::Stale => {
+            let path = claude_settings_path()?;
+            let Ok(s) = std::fs::read_to_string(&path) else {
+                return Ok(false);
+            };
+            let mut settings: Value = serde_json::from_str(&s)
+                .with_context(|| format!("{} is not valid JSON", path.display()))?;
+            if !refresh_statusline_config(&mut settings)? {
+                return Ok(false);
+            }
+            write_settings(&path, &settings)?;
+            Ok(true)
+        }
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&settings)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(true)
 }
 
 /// Remove the `statusLine` key we wrote (leaves the rest of `settings.json` untouched).

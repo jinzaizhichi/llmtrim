@@ -411,10 +411,69 @@ fn clear_guard_hook(settings: &mut Value, path: &Path) -> Result<bool> {
 }
 
 fn claude_settings_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .context("neither HOME nor USERPROFILE is set")?;
-    Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+    crate::statusline::claude_settings_path()
+}
+
+/// Ownership of the guard hook relative to this binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedStatus {
+    Missing,
+    Stale,
+    Current,
+}
+
+/// Whether ensure should wire / refresh the cold-cache guard.
+pub fn owned_status() -> OwnedStatus {
+    let Ok(path) = claude_settings_path() else {
+        return OwnedStatus::Missing;
+    };
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return OwnedStatus::Missing;
+    };
+    let Ok(settings) = serde_json::from_str::<Value>(&s) else {
+        return OwnedStatus::Missing;
+    };
+    owned_status_of(&settings)
+}
+
+fn owned_status_of(settings: &Value) -> OwnedStatus {
+    let Some(list) = settings
+        .get("hooks")
+        .and_then(|h| h.get("UserPromptSubmit"))
+        .and_then(Value::as_array)
+    else {
+        return OwnedStatus::Missing;
+    };
+    let Some(group) = list.iter().find(|g| is_ours(g)) else {
+        return OwnedStatus::Missing;
+    };
+    let desired = crate::statusline::exe_command("guard");
+    let current = group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .and_then(|hooks| {
+            hooks.iter().find_map(|h| {
+                h.get("command")
+                    .and_then(Value::as_str)
+                    .filter(|c| is_llmtrim_guard_command(c))
+            })
+        });
+    match current {
+        Some(c) if c == desired => OwnedStatus::Current,
+        Some(_) => OwnedStatus::Stale,
+        None => OwnedStatus::Missing,
+    }
+}
+
+/// Install or refresh our guard hook. Returns `true` when the file changed.
+pub fn sync_owned() -> Result<bool> {
+    match owned_status() {
+        OwnedStatus::Current => Ok(false),
+        OwnedStatus::Missing | OwnedStatus::Stale => {
+            wire()?;
+            Ok(true)
+        }
+    }
 }
 
 /// Wire the hook into `~/.claude/settings.json` (merging, never clobbering). Returns the file it
@@ -432,12 +491,7 @@ fn wire_at(path: PathBuf) -> Result<PathBuf> {
         Err(_) => Value::Object(Default::default()),
     };
     set_guard_hook(&mut settings, &path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(&settings)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    crate::statusline::atomic_write_json(&path, &settings)?;
     Ok(path)
 }
 
@@ -472,8 +526,7 @@ fn unwire_at(path: PathBuf) -> Result<bool> {
     if !clear_guard_hook(&mut settings, &path)? {
         return Ok(false);
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&settings)?)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    crate::statusline::atomic_write_json(&path, &settings)?;
     Ok(true)
 }
 

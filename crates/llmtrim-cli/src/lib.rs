@@ -15,6 +15,7 @@ pub mod compact;
 pub mod daemon;
 pub mod discover;
 pub mod doctor;
+pub mod ensure;
 pub mod guard;
 pub mod mcp;
 pub mod monitor;

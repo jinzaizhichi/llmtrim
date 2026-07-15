@@ -46,11 +46,12 @@ const HELP_TEMPLATE: &str = "\
 {usage-heading} {usage}
 
 Get started:
-  setup      Set everything up and start saving (CA, env, autostart, daemon)
+  setup      Set everything up and start saving (CA, env, autostart, integrations, daemon)
   status     Show the savings dashboard + interceptor health  [aliases: monitor, gain]
+  update     Update to the latest release and refresh integrations
+  ensure     Bring this machine to the recommended current state
   wrap       Launch an agent (claude, codex, …) routed through the interceptor
   sub        Reroute Claude Code to another subscription's backend (codex|kimi)
-  compact    Configure cheaper models for Claude Code /compact
   tray       Open the desktop tray app (savings menu-bar / system-tray)
 
 Daemon:
@@ -59,8 +60,7 @@ Daemon:
   autostart  Run the interceptor at login (--off to disable)
 
 When something's wrong:
-  doctor     Check the install end-to-end and explain anything broken
-  update     Update llmtrim to the latest release
+  doctor     Check the install end-to-end; `--fix` applies repairs
   uninstall  Undo everything `setup` did
 
 Pipes & one-shots:
@@ -124,7 +124,9 @@ enum Commands {
     /// Configure cheaper models for Claude Code `/compact`
     ///
     /// Configured alternatives are tried in order when they fit the request. The model Claude Code
-    /// originally requested is always the implicit final fallback.
+    /// originally requested is always the implicit final fallback. Prefer `llmtrim ensure` /
+    /// `setup` for the recommended defaults — this is the power-user escape hatch.
+    #[command(hide = true)]
     Compact {
         #[command(subcommand)]
         action: CompactCmd,
@@ -154,9 +156,10 @@ enum Commands {
     ///
     /// The fastest path from install to compressing: ensures the local CA, sets
     /// HTTPS_PROXY + CA trust in your environment (shell profile on POSIX,
-    /// HKCU\Environment on Windows), enables run-at-login, and starts the
-    /// interceptor. Idempotent — re-running reuses the same port and won't restart a
-    /// healthy daemon. No IDE settings are touched, no sudo.
+    /// HKCU\Environment on Windows), enables run-at-login, wires Claude Code
+    /// integrations (statusline, guard, /sub, compact), and starts the interceptor.
+    /// Idempotent — re-running reuses the same port and won't restart a healthy daemon.
+    /// No sudo.
     Setup {
         /// Interceptor port. Omit to auto-select a free port starting at 43117.
         #[arg(long)]
@@ -165,6 +168,16 @@ enum Commands {
         /// up a new binary). By default setup leaves a healthy same-port daemon running.
         #[arg(long)]
         force: bool,
+    },
+    /// Bring this machine to the recommended current state
+    ///
+    /// Idempotent: rewrites owned Claude Code hooks/statusline when stale, installs
+    /// recommended integrations you have not opted out of, and restarts a version-skewed
+    /// daemon. Same engine `setup` and `update` use — the one verb after a release.
+    Ensure {
+        /// Suppress the summary panel (for scripts / postinstall hooks).
+        #[arg(long, short = 'q')]
+        quiet: bool,
     },
     /// Undo everything `setup` did
     ///
@@ -215,10 +228,11 @@ enum Commands {
     /// interceptor is actually running.
     #[command(name = "_alive", hide = true)]
     Alive,
-    /// Update llmtrim to the latest release
+    /// Update llmtrim to the latest release and refresh integrations
     ///
-    /// Channel-aware: a binary install self-updates via the installer; cargo and
-    /// Homebrew installs print their package manager's command.
+    /// Channel-aware: a binary install self-updates via the installer, restarts the
+    /// daemon, and runs `ensure`. Cargo / Homebrew / npm print their package command;
+    /// run `llmtrim ensure` after that finishes (or open status and press f).
     Update,
     /// Show the savings dashboard + interceptor health
     ///
@@ -272,32 +286,35 @@ enum Commands {
         #[command(subcommand)]
         action: Option<McpAction>,
     },
-    /// Render Claude Code's custom status line (or `statusline install` to wire it up)
+    /// Render Claude Code's custom status line (hook entrypoint; prefer `llmtrim ensure`)
     ///
     /// With no subcommand, reads Claude Code's JSON session blob on stdin and prints one
-    /// elegant line — model·effort→backend, a context-health gauge, compression saved, and
-    /// (when present) rate-limit usage and this turn's prompt-cache reuse. `install` wires it
-    /// into `~/.claude/settings.json`; `install --print` just prints the settings snippet.
+    /// elegant line. `install` / `uninstall` are power-user escape hatches — `setup`,
+    /// `update`, and `ensure` keep the status line current automatically.
+    #[command(hide = true)]
     Statusline {
         #[command(subcommand)]
         action: Option<StatuslineCmd>,
     },
-    /// Warn before the first turn of a resumed, cold-cache session (or `guard install` to wire it up)
+    /// Cold-cache resume warning hook (prefer `llmtrim ensure`)
     ///
-    /// With no subcommand, acts as Claude Code's `UserPromptSubmit` hook: reads the hook JSON on
-    /// stdin and, when the session has been idle past the prompt-cache TTL with a large context,
-    /// blocks that one prompt and prints what re-writing the context will cost. Resend to go ahead.
-    /// `install` wires it into `~/.claude/settings.json` (merging with your other hooks);
-    /// `install --print` just prints the settings snippet.
+    /// With no subcommand, acts as Claude Code's `UserPromptSubmit` hook. `install` /
+    /// `uninstall` are escape hatches — `setup` / `update` / `ensure` wire this for you.
+    #[command(hide = true)]
     Guard {
         #[command(subcommand)]
         action: Option<GuardCmd>,
     },
     /// Check the install end-to-end and explain anything broken
     ///
-    /// Read-only diagnosis: binary, daemon, port, env wiring (persisted + this shell),
-    /// CA, autostart, ledger, version skew. Exits non-zero if any check fails.
-    Doctor,
+    /// Diagnosis: binary, daemon, port, env wiring (persisted + this shell), CA, autostart,
+    /// ledger, version skew, Claude Code integrations. Exits non-zero if any check fails.
+    /// Pass `--fix` to apply repairs (same as `llmtrim ensure`).
+    Doctor {
+        /// Apply recommended fixes instead of only naming them.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Run the interceptor at login (`--off` to disable)
     ///
     /// systemd (Linux) / launchd (macOS) / registry run-key (Windows).
@@ -778,11 +795,17 @@ fn run_window_sub(args: Vec<String>) -> Result<()> {
     };
     match action {
         "install" => {
-            llmtrim::window_sub::install(&std::env::current_exe()?.display().to_string())?;
+            llmtrim::window_sub::install(&llmtrim::statusline::stable_exe_string())?;
+            if let Err(e) = llmtrim::ensure::set_opt_out("window_sub", false) {
+                eprintln!("llmtrim: could not clear /sub opt-out: {e:#}");
+            }
             println!("Claude Code /sub integration installed.");
         }
         "uninstall" => {
             llmtrim::window_sub::uninstall()?;
+            if let Err(e) = llmtrim::ensure::set_opt_out("window_sub", true) {
+                eprintln!("llmtrim: could not record /sub opt-out: {e:#}");
+            }
             println!("Claude Code /sub integration removed.");
         }
         "hook-start" => {
@@ -969,6 +992,9 @@ fn run_compact(action: CompactCmd) -> Result<()> {
                 anyhow::bail!("compact model list is empty; use `llmtrim compact off` to disable");
             }
             llmtrim_core::config::write_compact_models(&normalized)?;
+            if let Err(e) = llmtrim::ensure::set_opt_out("compact", false) {
+                eprintln!("llmtrim: could not clear compact opt-out: {e:#}");
+            }
             println!(
                 "Compact models: {} -> original model (implicit).",
                 normalized.join(" -> ")
@@ -978,6 +1004,9 @@ fn run_compact(action: CompactCmd) -> Result<()> {
         }
         CompactCmd::Off { no_restart } => {
             llmtrim_core::config::write_compact_models(&[])?;
+            if let Err(e) = llmtrim::ensure::set_opt_out("compact", true) {
+                eprintln!("llmtrim: could not record compact opt-out: {e:#}");
+            }
             println!("Compact model substitution disabled; `/compact` uses the original model.");
             apply_sub_change(no_restart);
             Ok(())
@@ -1401,6 +1430,7 @@ fn run() -> Result<()> {
             }
         }
         Commands::Setup { port, force } => llmtrim::setup::run(port, force)?,
+        Commands::Ensure { quiet } => llmtrim::ensure::run_cli(quiet)?,
         Commands::Uninstall { purge, keep_binary } => {
             llmtrim::setup::uninstall(purge, keep_binary)?
         }
@@ -1435,6 +1465,8 @@ fn run() -> Result<()> {
                         )
                     )
                 );
+                // Quiet migration after version bumps — no prompts, no tray download.
+                let _ = llmtrim::ensure::maybe_auto();
             } else {
                 // No live daemon → resolve the port the same way `setup` does (explicit, else
                 // the one already wired into the env, else DEFAULT_PORT) so we match clients.
@@ -1447,6 +1479,7 @@ fn run() -> Result<()> {
                         &format!("Interceptor running · pid {pid} · port {port}")
                     )
                 );
+                let _ = llmtrim::ensure::maybe_auto();
                 for (label, value) in [
                     ("watch", "llmtrim status".to_string()),
                     ("stop", "llmtrim stop".to_string()),
@@ -1559,15 +1592,35 @@ fn run() -> Result<()> {
         },
         Commands::Statusline { action } => match action {
             None => llmtrim::statusline::run()?,
-            Some(StatuslineCmd::Install { print }) => llmtrim::statusline::install(print)?,
-            Some(StatuslineCmd::Uninstall) => llmtrim::statusline::uninstall()?,
+            Some(StatuslineCmd::Install { print }) => {
+                llmtrim::statusline::install(print)?;
+                if !print && let Err(e) = llmtrim::ensure::set_opt_out("statusline", false) {
+                    eprintln!("llmtrim: could not clear statusline opt-out: {e:#}");
+                }
+            }
+            Some(StatuslineCmd::Uninstall) => {
+                llmtrim::statusline::uninstall()?;
+                if let Err(e) = llmtrim::ensure::set_opt_out("statusline", true) {
+                    eprintln!("llmtrim: could not record statusline opt-out: {e:#}");
+                }
+            }
         },
         Commands::Guard { action } => match action {
             // The hook path: Claude Code reads the exit code, so return it rather than a Result —
             // 2 blocks the prompt, anything else lets it through.
             None => std::process::exit(llmtrim::guard::run()),
-            Some(GuardCmd::Install { print }) => llmtrim::guard::install(print)?,
-            Some(GuardCmd::Uninstall) => llmtrim::guard::uninstall()?,
+            Some(GuardCmd::Install { print }) => {
+                llmtrim::guard::install(print)?;
+                if !print && let Err(e) = llmtrim::ensure::set_opt_out("guard", false) {
+                    eprintln!("llmtrim: could not clear guard opt-out: {e:#}");
+                }
+            }
+            Some(GuardCmd::Uninstall) => {
+                llmtrim::guard::uninstall()?;
+                if let Err(e) = llmtrim::ensure::set_opt_out("guard", true) {
+                    eprintln!("llmtrim: could not record guard opt-out: {e:#}");
+                }
+            }
         },
         Commands::Monitor {
             // Deprecated no-op (see the field docs): accepted, then ignored.
@@ -1583,7 +1636,10 @@ fn run() -> Result<()> {
         } => run_monitor(
             interval, daily, weekly, monthly, json, breakdown, csv, quiet,
         )?,
-        Commands::Doctor => {
+        Commands::Doctor { fix } => {
+            if fix {
+                llmtrim::ensure::run_cli(false)?;
+            }
             let report = llmtrim::doctor::gather();
             print!("{}", llmtrim::doctor::render(ui::color_stdout(), &report));
             if report.problems > 0 {
@@ -2876,6 +2932,8 @@ fn run_monitor(
             // The TUI may queue a follow-up command (d = doctor/repair, u = update); run it on
             // the normal screen after the alt-screen tears down.
             use llmtrim::breakdown::app::PostAction;
+            // Heal integrations from a version bump before the TUI opens (quiet).
+            let _ = llmtrim::ensure::maybe_auto();
             match llmtrim::breakdown::app::run(interval.max(2), snapshot)? {
                 PostAction::Doctor => {
                     let report = llmtrim::doctor::gather();

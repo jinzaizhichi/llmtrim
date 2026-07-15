@@ -495,102 +495,26 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         Err(e) => rows.push((ui::WARN, "Autostart".into(), format!("not enabled: {e}"))),
     }
 
-    // 3b. Desktop tray. Only offered when the GUI binary is installed next to the
-    //     CLI (the desktop bundles ship it; a headless `cargo install` doesn't),
-    //     which is also how "only on a desktop OS" is enforced. Default is on;
-    //     `--force` / a non-interactive setup take that default without asking.
-    if crate::tray::tray_binary().is_some() {
-        let want = force || confirm_tray_default_yes();
-        match crate::autostart::configure_tray(want) {
-            Ok(()) if want => rows.push((
-                ui::OK,
-                "Tray".into(),
-                "opens at login · run `llmtrim tray` to open now".into(),
-            )),
-            Ok(()) => rows.push((
-                ui::OK,
-                "Tray".into(),
-                "left disabled · enable later with `llmtrim autostart --tray`".into(),
-            )),
-            Err(e) => rows.push((ui::WARN, "Tray".into(), format!("not enabled: {e}"))),
-        }
-    }
-
-    // 3c. Claude Code compaction routing. Ask only on first configuration; re-running setup must
-    // never overwrite a customized order or a remembered opt-out. Scripted setup takes the
-    // recommended default, matching the tray's non-interactive default behavior.
-    let mut compact_changed = false;
-    if crate::statusline::claude_code_present()
-        && !llmtrim_core::config::compact_models_configured()
-    {
-        let want = force || confirm_compact_default_yes();
-        let models = if want {
-            vec!["haiku".to_string(), "sonnet".to_string()]
-        } else {
-            Vec::new()
-        };
-        match llmtrim_core::config::write_compact_models(&models) {
-            Ok(()) => {
-                compact_changed = true;
-                rows.push((
-                    ui::OK,
-                    "Compact".into(),
-                    if want {
-                        "Haiku → Sonnet → original model".into()
-                    } else {
-                        "original model only".into()
-                    },
-                ));
-            }
-            Err(e) => rows.push((ui::WARN, "Compact".into(), format!("not configured: {e}"))),
-        }
-    }
-
-    // 3d. Claude Code's cold-cache guard. Offered only to Claude Code users (setup stays
-    //     client-agnostic otherwise), default on; `--force` / a non-interactive setup take that
-    //     default without asking. Merges into `hooks.UserPromptSubmit` — other hooks are kept.
-    if crate::statusline::claude_code_present() {
-        if force || confirm_guard_default_yes() {
-            match crate::guard::wire() {
-                Ok(path) => rows.push((
-                    ui::OK,
-                    "Guard".into(),
-                    format!("warns before a cold resumed turn · {}", path.display()),
-                )),
-                Err(e) => rows.push((ui::WARN, "Guard".into(), format!("not wired: {e}"))),
-            }
-        } else {
-            rows.push((
-                ui::OK,
-                "Guard".into(),
-                "left off · enable later with `llmtrim guard install`".into(),
-            ));
-        }
-    }
-    // Window-local /sub is safe to install automatically: it only adds owned hooks and a skill;
-    // it neither edits global reroute configuration nor restarts the daemon.
-    if crate::statusline::claude_code_present() {
-        match std::env::current_exe()
-            .ok()
-            .map(|p| crate::window_sub::install(&p.display().to_string()))
-        {
-            Some(Ok(())) => rows.push((
-                ui::OK,
-                "Window /sub".into(),
-                "installed Claude Code window-local controls".into(),
-            )),
-            Some(Err(e)) => rows.push((
-                ui::WARN,
-                "Window /sub".into(),
-                format!("not installed: {e}"),
-            )),
-            None => rows.push((
-                ui::WARN,
-                "Window /sub".into(),
-                "could not resolve llmtrim binary".into(),
-            )),
-        }
-    }
+    // 3b. Claude Code integrations + tray: one ensure pass (statusline, guard, /sub, compact,
+    //     tray autostart). Idempotent; honors remembered opt-outs. `--force` / non-TTY take
+    //     recommended defaults without asking.
+    let ensure_report = crate::ensure::apply(crate::ensure::Options {
+        interactive: !force && std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        quiet: true,
+        restart_daemon: false, // setup reconciles the interceptor below
+        download_tray: false,
+        install_missing: true,
+    })
+    .unwrap_or_else(|e| {
+        rows.push((
+            ui::WARN,
+            "Ensure".into(),
+            format!("integrations skipped: {e:#}"),
+        ));
+        crate::ensure::Report::default()
+    });
+    let compact_changed = ensure_report.applied.contains(&"compact");
+    rows.extend(ensure_report.rows);
 
     // 4. Reconcile the interceptor. If a healthy daemon is already serving the resolved port,
     //    leave it running — re-running `setup` must not drop in-flight requests (the old code
@@ -697,14 +621,8 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         "  {}  llmtrim status",
         ui::paint(color, Tone::Dim, "watch savings")
     );
-    // Claude Code users only: hint at the status line without writing their config (setup is
-    // client-agnostic and never touches IDE settings). No-op for users of other agents.
-    if crate::statusline::claude_code_present() {
-        println!(
-            "  {}  llmtrim statusline install",
-            ui::paint(color, Tone::Dim, "status line  ")
-        );
-    }
+    // Claude Code integrations (statusline, guard, /sub, compact) are applied by ensure above —
+    // no separate install homework.
     #[cfg(windows)]
     println!(
         "{}",
@@ -759,57 +677,6 @@ pub fn run(requested: Option<u16>, force: bool) -> Result<()> {
         println!("    gemini extensions uninstall caveman  # Gemini CLI");
     }
     Ok(())
-}
-
-/// Ask whether to route Claude Code compaction through cheaper models, defaulting to yes. A
-/// scripted setup takes the default without blocking on stdin.
-fn confirm_compact_default_yes() -> bool {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        return true;
-    }
-    print!("Use cheaper models for Claude Code /compact (Haiku -> Sonnet -> original)? [Y/n] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
-}
-
-/// Ask whether to enable the desktop tray, defaulting to yes. Returns `true`
-/// (the default) without asking when stdin isn't a terminal, so a scripted
-/// `setup` stays non-interactive and still enables the tray.
-fn confirm_tray_default_yes() -> bool {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        return true;
-    }
-    print!("Enable the llmtrim desktop tray (opens at login)? [Y/n] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        // The prompt couldn't be completed (broken pipe, closed stdin). Decline
-        // rather than enable an optional component the user never confirmed.
-        return false;
-    }
-    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
-}
-
-/// Ask whether to arm the cold-cache guard, defaulting to yes. Same contract as
-/// [`confirm_tray_default_yes`]: a scripted `setup` stays non-interactive and takes the default.
-fn confirm_guard_default_yes() -> bool {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        return true;
-    }
-    print!("Warn before the first turn of a resumed session whose cache went cold? [Y/n] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
 /// Best-effort caveman detection: the flag file its session hook writes, its standalone

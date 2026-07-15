@@ -181,7 +181,7 @@ pub fn run(
     // the UI thread never runs a query for Detail.
     let detail_db = BreakdownDb::open().context("failed to open breakdown ledger")?;
     enable_raw_mode().context("failed to enter raw mode")?;
-    let _guard = TerminalGuard;
+    let guard = TerminalGuard;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
     // Buffer the backend so each frame is one write/flush instead of many small syscalls.
@@ -325,10 +325,29 @@ pub fn run(
     if let Err(e) = detail_worker.join() {
         eprintln!("llmtrim: breakdown detail thread panicked: {e:?}");
     }
-    Ok(app.action)
+    let action = app.action;
+    let pending_ensure = app.pending_ensure;
+    let pending_sub_login = app.pending_sub_login;
+    // Leave alt-screen before any normal stdout work (ensure / sub hints).
+    drop(terminal);
+    drop(guard);
+    if pending_ensure {
+        crate::ensure::run_cli(false)?;
+    }
+    if pending_sub_login {
+        let _ = crate::ensure::mark_sub_nudge_shown();
+        println!("Subscription setup: pick a provider, then log in.");
+        println!("  llmtrim sub auth codex login   # ChatGPT / Codex plan");
+        println!("  llmtrim sub auth kimi login    # Kimi coding plan");
+        println!("  llmtrim sub on codex           # enable after login");
+    }
+    Ok(action)
 }
 
 /// What the caller should do after the TUI exits — set by a key, run on the normal screen.
+///
+/// Keep the public variant set stable (semver): new TUI actions that only need work inside
+/// this crate are handled before returning (see `f` / sub-nudge keys).
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum PostAction {
     #[default]
@@ -370,6 +389,14 @@ struct App {
     /// Whether the tray GUI is installed next to the CLI — gates the `y tray` action so the
     /// hint never offers something that can't run. Resolved once at construction.
     tray_available: bool,
+    /// Integrations need attention (statusline/guard/daemon skew…) — gates `f` fix.
+    needs_ensure: bool,
+    /// One-time subscription onboarding on the Overview tab.
+    show_sub_nudge: bool,
+    /// Run `ensure` after the TUI tears down (alt-screen left). Keeps `PostAction` stable.
+    pending_ensure: bool,
+    /// Print sub login steps after the TUI tears down.
+    pending_sub_login: bool,
 }
 
 impl App {
@@ -391,6 +418,10 @@ impl App {
             detail_req: None,
             action: PostAction::None,
             tray_available: crate::tray::tray_binary().is_some(),
+            needs_ensure: crate::ensure::needs_attention(),
+            show_sub_nudge: crate::ensure::should_show_sub_nudge(),
+            pending_ensure: false,
+            pending_sub_login: false,
         }
     }
 
@@ -438,10 +469,15 @@ impl App {
                 palette::cycle();
                 let _ = llmtrim_core::config::save_theme(palette::ident());
             }
-            // `d`/`u` queue a command and quit, so it runs on the normal screen (not inside the
-            // alt-screen): `d` = repair check (doctor), `u` = update.
+            // `d`/`f`/`u` queue a command and quit, so it runs on the normal screen (not inside
+            // the alt-screen): `d` = doctor, `f` = ensure/fix integrations, `u` = update.
             KeyCode::Char('d') => {
                 self.action = PostAction::Doctor;
+                return true;
+            }
+            KeyCode::Char('f') if self.needs_ensure => {
+                // Run ensure after alt-screen exit so `PostAction` stays semver-stable.
+                self.pending_ensure = true;
                 return true;
             }
             KeyCode::Char('u') => {
@@ -457,6 +493,17 @@ impl App {
                     PostAction::Update
                 };
                 return true;
+            }
+            // One-time sub onboarding: `s` = show login steps (after exit), `n` = never again.
+            KeyCode::Char('s') if self.show_sub_nudge && self.tab == Tab::Overview => {
+                self.show_sub_nudge = false;
+                self.pending_sub_login = true;
+                return true;
+            }
+            KeyCode::Char('n') if self.show_sub_nudge && self.tab == Tab::Overview => {
+                self.show_sub_nudge = false;
+                let _ = crate::ensure::dismiss_sub_nudge();
+                return false;
             }
             // `c` flips the Overview gauge between "% of new content" and "% of the whole prompt"
             // — the one figure with two honest framings. It's a no-op on the other tabs, which
@@ -704,6 +751,15 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        // Integrations stale / missing — `f` fixes without reading the changelog.
+        if self.needs_ensure {
+            meta.push(Span::styled(
+                "  ⚠ fix",
+                Style::default()
+                    .fg(palette::warn())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         meta.push(Span::styled(
             format!(
                 " │ {h12}:{m:02}:{s:02} {ampm} │ ↻ {}s",
@@ -835,13 +891,19 @@ impl App {
             Tab::Detail => String::from(" Tab tabs · ⇧Tab pane · ↑↓ move · →/← expand"),
         };
         if problem {
-            keys.push_str(" · d repair");
+            keys.push_str(" · d doctor");
+        }
+        if self.needs_ensure {
+            keys.push_str(" · f fix");
         }
         if update {
             keys.push_str(" · u update");
         }
         if self.tray_available {
             keys.push_str(" · y tray");
+        }
+        if self.show_sub_nudge && self.tab == Tab::Overview {
+            keys.push_str(" · s sub · n dismiss");
         }
         keys.push_str(match self.tab {
             Tab::Overview => " · t theme · ? help · q quit",
@@ -898,6 +960,10 @@ fn render_help_overlay(f: &mut Frame, tray: bool) {
         lines.push(Line::from("  y                  open the desktop tray"));
     }
     lines.extend([
+        Line::from("  f                  fix integrations (ensure)"),
+        Line::from("  d                  doctor (diagnose)"),
+        Line::from("  u                  update / restart stale daemon"),
+        Line::from("  s / n              sub setup / dismiss (when shown)"),
         Line::from(""),
         Line::from("  \"would have cost\" = the price at your provider's"),
         Line::from("   normal rate; \"you paid\" is after llmtrim trimmed it."),

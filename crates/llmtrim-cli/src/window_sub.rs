@@ -332,6 +332,85 @@ fn remove_owned_hooks(groups: &mut Vec<serde_json::Value>) {
             .is_none_or(|hooks| !hooks.is_empty())
     });
 }
+/// Ownership of the `/sub` skill + hooks relative to this binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedStatus {
+    Missing,
+    Stale,
+    Current,
+}
+
+/// Whether the Claude Code `/sub` skill + owned hooks are present.
+pub fn is_installed() -> bool {
+    !matches!(owned_status(), OwnedStatus::Missing)
+}
+
+/// Missing / present-but-stale-path / current for ensure probe + apply.
+pub fn owned_status() -> OwnedStatus {
+    let Ok(p) = settings_path() else {
+        return OwnedStatus::Missing;
+    };
+    let Some(skill) = p
+        .parent()
+        .map(|dir| dir.join("skills").join(COMMAND_NAME).join("SKILL.md"))
+    else {
+        return OwnedStatus::Missing;
+    };
+    if !fs::read_to_string(&skill)
+        .unwrap_or_default()
+        .contains("llmtrim-owned-window-sub")
+    {
+        return OwnedStatus::Missing;
+    }
+    let Some(root) = fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    else {
+        return OwnedStatus::Missing;
+    };
+    let Some(hooks) = root.get("hooks").and_then(serde_json::Value::as_object) else {
+        return OwnedStatus::Missing;
+    };
+    let desired = crate::statusline::stable_exe_string();
+    let desired_quoted = quoted_exe(&desired);
+    let mut saw = false;
+    let mut current = true;
+    for event in ["SessionStart", "SessionEnd"] {
+        let Some(groups) = hooks.get(event).and_then(|v| v.as_array()) else {
+            return OwnedStatus::Missing;
+        };
+        let mut event_ok = false;
+        for group in groups {
+            let Some(hs) = group.get("hooks").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for h in hs {
+                if !owned(h) {
+                    continue;
+                }
+                saw = true;
+                event_ok = true;
+                let cmd = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                // Hook is current if it embeds this binary (quoted or raw).
+                if !(cmd.contains(&desired_quoted) || cmd.contains(&desired)) {
+                    current = false;
+                }
+            }
+        }
+        if !event_ok {
+            return OwnedStatus::Missing;
+        }
+    }
+    if !saw {
+        return OwnedStatus::Missing;
+    }
+    if current {
+        OwnedStatus::Current
+    } else {
+        OwnedStatus::Stale
+    }
+}
+
 pub fn install(exe: &str) -> Result<()> {
     let hook_exe = quoted_exe(exe);
     let p = settings_path()?;

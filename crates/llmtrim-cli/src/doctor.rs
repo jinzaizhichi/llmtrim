@@ -1,9 +1,10 @@
-//! `llmtrim doctor` — read-only, end-to-end install diagnosis.
+//! `llmtrim doctor` — end-to-end install diagnosis (optionally repairs with `--fix`).
 //!
 //! One pass/fail row per link in the chain (binary → daemon → port → env → CA →
-//! autostart → ledger), each failing row naming its fix. `status` shows the same chain
-//! compressed to a header; doctor is the long form for "it doesn't work, why?".
-//! Gathering is separated from rendering so the row logic is unit-testable.
+//! autostart → ledger → integrations), each failing row naming its fix. `status` shows
+//! the same chain compressed to a header; doctor is the long form for "it doesn't work,
+//! why?". Pass `--fix` to run [`crate::ensure`] first. Gathering is separated from
+//! rendering so the row logic is unit-testable.
 
 use crate::ui;
 
@@ -98,7 +99,17 @@ pub fn gather() -> Report {
             .map(|p| p.display().to_string()),
         update_available: crate::update::check(false),
     };
-    build(&state)
+    let mut report = build(&state);
+    // Gaps are not part of the public `State` shape (semver); append after pure `build`.
+    for gap in crate::ensure::probe() {
+        report.rows.push((
+            ui::WARN,
+            gap.label.to_ascii_lowercase(),
+            format!("{} — fix: llmtrim ensure", gap.detail),
+        ));
+        report.problems += 1;
+    }
+    report
 }
 
 /// Turn probed state into checklist rows. Pure — the testable core of doctor.
