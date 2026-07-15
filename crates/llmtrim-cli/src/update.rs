@@ -317,10 +317,7 @@ fn post_update_ensure(color: bool) {
         .status();
     match status {
         Ok(s) if s.success() => {
-            println!(
-                "{}",
-                crate::ui::ok(color, "Integrations synced.")
-            );
+            println!("{}", crate::ui::ok(color, "Integrations synced."));
         }
         Ok(_) => eprintln!(
             "{}",

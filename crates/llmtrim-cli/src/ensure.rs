@@ -61,8 +61,7 @@ fn load_at(path: &Path) -> Result<State> {
     if !path.exists() {
         return Ok(State::default());
     }
-    let s = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let s = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&s).with_context(|| {
         format!(
             "{} is corrupt or invalid JSON — fix or delete it before running ensure              (deleting resets opt-outs)",
@@ -73,8 +72,7 @@ fn load_at(path: &Path) -> Result<State> {
 
 fn save_at(path: &Path, state: &State) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(state)?)
@@ -195,10 +193,7 @@ fn probe_with(state: &State) -> Vec<Gap> {
         }
     }
 
-    if claude
-        && !state.opt_out.compact
-        && !llmtrim_core::config::compact_models_configured()
-    {
+    if claude && !state.opt_out.compact && !llmtrim_core::config::compact_models_configured() {
         gaps.push(Gap {
             id: "compact",
             label: "Compact".into(),
@@ -265,8 +260,8 @@ pub fn apply(opts: Options) -> Result<Report> {
 
     if claude && !state.opt_out.statusline {
         let status = crate::statusline::owned_status();
-        let skip_missing = !opts.install_missing
-            && matches!(status, crate::statusline::OwnedStatus::Missing);
+        let skip_missing =
+            !opts.install_missing && matches!(status, crate::statusline::OwnedStatus::Missing);
         if !skip_missing {
             match crate::statusline::sync_owned() {
                 Ok(crate::statusline::SyncOutcome::Installed) => {
@@ -286,7 +281,9 @@ pub fn apply(opts: Options) -> Result<Report> {
                     ));
                 }
                 Ok(crate::statusline::SyncOutcome::AlreadyCurrent) => {
-                    report.rows.push((ui::OK, "Statusline".into(), "current".into()));
+                    report
+                        .rows
+                        .push((ui::OK, "Statusline".into(), "current".into()));
                 }
                 Ok(crate::statusline::SyncOutcome::SkippedForeign) => {
                     report.rows.push((
@@ -295,11 +292,11 @@ pub fn apply(opts: Options) -> Result<Report> {
                         "custom status line left alone".into(),
                     ));
                 }
-                Err(e) => report.rows.push((
-                    ui::WARN,
-                    "Statusline".into(),
-                    format!("not wired: {e:#}"),
-                )),
+                Err(e) => {
+                    report
+                        .rows
+                        .push((ui::WARN, "Statusline".into(), format!("not wired: {e:#}")))
+                }
             }
         }
     } else if claude && state.opt_out.statusline {
@@ -310,8 +307,8 @@ pub fn apply(opts: Options) -> Result<Report> {
 
     if claude && !state.opt_out.guard {
         let gstatus = crate::guard::owned_status();
-        let skip_missing = !opts.install_missing
-            && matches!(gstatus, crate::guard::OwnedStatus::Missing);
+        let skip_missing =
+            !opts.install_missing && matches!(gstatus, crate::guard::OwnedStatus::Missing);
         if !skip_missing {
             match crate::guard::sync_owned() {
                 Ok(true) => {
@@ -338,8 +335,8 @@ pub fn apply(opts: Options) -> Result<Report> {
 
     if claude && !state.opt_out.window_sub {
         let wstatus = crate::window_sub::owned_status();
-        let skip_missing = !opts.install_missing
-            && matches!(wstatus, crate::window_sub::OwnedStatus::Missing);
+        let skip_missing =
+            !opts.install_missing && matches!(wstatus, crate::window_sub::OwnedStatus::Missing);
         if !skip_missing {
             let was_installed = matches!(
                 wstatus,
@@ -362,11 +359,11 @@ pub fn apply(opts: Options) -> Result<Report> {
                         ));
                     }
                 }
-                Err(e) => report.rows.push((
-                    ui::WARN,
-                    "/sub".into(),
-                    format!("not installed: {e:#}"),
-                )),
+                Err(e) => {
+                    report
+                        .rows
+                        .push((ui::WARN, "/sub".into(), format!("not installed: {e:#}")))
+                }
             }
         }
     } else if claude && state.opt_out.window_sub {
@@ -395,11 +392,11 @@ pub fn apply(opts: Options) -> Result<Report> {
                         "Haiku → Sonnet → original model".into(),
                     ));
                 }
-                Err(e) => report.rows.push((
-                    ui::WARN,
-                    "Compact".into(),
-                    format!("not configured: {e:#}"),
-                )),
+                Err(e) => {
+                    report
+                        .rows
+                        .push((ui::WARN, "Compact".into(), format!("not configured: {e:#}")))
+                }
             }
         } else {
             // Remember opt-out as empty models list + flag.
@@ -412,17 +409,13 @@ pub fn apply(opts: Options) -> Result<Report> {
             ));
         }
     } else if claude && llmtrim_core::config::compact_models_configured() {
-        report.rows.push((
-            ui::OK,
-            "Compact".into(),
-            "configured".into(),
-        ));
+        report
+            .rows
+            .push((ui::OK, "Compact".into(), "configured".into()));
     }
 
     // Tray autostart when binary is present (explicit ensure/setup only).
-    if opts.install_missing
-        && crate::tray::tray_binary().is_some()
-        && !state.opt_out.tray_autostart
+    if opts.install_missing && crate::tray::tray_binary().is_some() && !state.opt_out.tray_autostart
     {
         if !crate::autostart::is_tray_enabled() {
             let want = if opts.interactive {
@@ -455,11 +448,9 @@ pub fn apply(opts: Options) -> Result<Report> {
                 ));
             }
         } else {
-            report.rows.push((
-                ui::OK,
-                "Tray".into(),
-                "autostart on".into(),
-            ));
+            report
+                .rows
+                .push((ui::OK, "Tray".into(), "autostart on".into()));
         }
     } else if opts.install_missing
         && crate::tray::tray_binary().is_none()
@@ -488,11 +479,11 @@ pub fn apply(opts: Options) -> Result<Report> {
                         let _ = crate::autostart::configure_tray(true);
                     }
                 }
-                Err(e) => report.rows.push((
-                    ui::WARN,
-                    "Tray".into(),
-                    format!("download failed: {e:#}"),
-                )),
+                Err(e) => {
+                    report
+                        .rows
+                        .push((ui::WARN, "Tray".into(), format!("download failed: {e:#}")))
+                }
             }
         } else if opts.interactive {
             state.opt_out.tray_download = true;
@@ -632,7 +623,9 @@ pub fn should_show_sub_nudge() -> bool {
     }
     // Only nudge when sub is not already configured.
     let cfg = llmtrim_core::config::RuntimeConfig::get();
-    cfg.sub.as_deref().is_none_or(|s| s == "off" || s.is_empty())
+    cfg.sub
+        .as_deref()
+        .is_none_or(|s| s == "off" || s.is_empty())
 }
 
 /// Mark the sub onboarding nudge as shown / dismissed.
@@ -751,8 +744,8 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
     }
     use std::io::Read;
     let mut reader = resp.body_mut().as_reader();
-    let mut file = std::fs::File::create(dest)
-        .with_context(|| format!("create {}", dest.display()))?;
+    let mut file =
+        std::fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
     // Bound size (~64 MiB) so a runaway response cannot fill the disk.
     let mut limited = Read::take(&mut reader, 64 * 1024 * 1024);
     let n = std::io::copy(&mut limited, &mut file).context("write download")?;
@@ -785,12 +778,9 @@ fn extract_tray_tarball_safe(tarball: &Path, tmp_dir: &Path) -> Result<PathBuf> 
         }
         members.push(name.to_string());
     }
-    let has_tray = members.iter().any(|m| {
-        Path::new(m)
-            .file_name()
-            .and_then(|f| f.to_str())
-            == Some("llmtrim-tray")
-    });
+    let has_tray = members
+        .iter()
+        .any(|m| Path::new(m).file_name().and_then(|f| f.to_str()) == Some("llmtrim-tray"));
     if !has_tray {
         anyhow::bail!("tray archive does not contain llmtrim-tray");
     }

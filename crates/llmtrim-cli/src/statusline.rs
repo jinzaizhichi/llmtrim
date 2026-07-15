@@ -816,7 +816,8 @@ pub(crate) fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(value)?)
         .with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename onto {}", path.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename onto {}", path.display()))?;
     Ok(())
 }
 
@@ -990,9 +991,7 @@ fn owned_status_of(settings: &Value) -> OwnedStatus {
         .get("refreshInterval")
         .and_then(Value::as_i64)
         .unwrap_or(REFRESH_INTERVAL_SECS);
-    let refresh = status_line
-        .get("refreshInterval")
-        .and_then(Value::as_i64);
+    let refresh = status_line.get("refreshInterval").and_then(Value::as_i64);
     if command == desired_cmd && refresh == Some(desired_refresh) {
         OwnedStatus::Current
     } else {
