@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
   the next turn fell back to Anthropic. SessionEnd now keeps the live session map and a
   short-lived `cleared` backup; SessionStart reattaches via session map, that backup, or the
   env token last (so a stale token from another window cannot override this session).
+- **`/sub` skill bash no longer trips Claude Code permission checks.** Session id is read from
+  process env (not shell-expanded on the skill line), and `Bash(<llmtrim> window-sub slash *)` is
+  pre-approved via skill `allowed-tools` + `settings.permissions.allow`. `ensure` treats a
+  missing/stale allow rule as stale so upgrades self-heal.
 
 ## [0.11.1] - 2026-07-16
 
