@@ -6,7 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-07-20
+
+### Added
+
+- **`llmtrim setup --env` creates CA files (if needed) and prints envvars** When this option is
+  used, setup ensures the local CA (and, on POSIX, the combined OS-trust bundle) exist, then
+  prints an evaluatable snippet — `export` lines on POSIX, `$env:` assignments on Windows — to
+  wire the interceptor into your current shell.
+
 ### Fixed
+
+- **The managed shell-profile block now single-quotes its values.** `setup` interpolated the proxy
+  URL and CA paths into bare double quotes, so a home directory or CA path containing `"`, `$`, a
+  backtick or a backslash produced a profile line that broke or expanded at shell start. Values
+  are now emitted as inert single-quoted literals on both the POSIX and PowerShell paths, matching
+  the quoting `setup --env` already used. Re-run `llmtrim setup` to rewrite an existing block.
 
 - **A legacy `sub` value keeps its formatting when migrated to a `[sub]` table.** Coercing
   `sub = "codex"` or an inline `sub = { … }` emitted the header as `[sub ]`, leaking the space
@@ -30,21 +45,6 @@ All notable changes to this project are documented here. The format follows
   llmtrim could no longer parse. It now consumes the whole array. A file already damaged this
   way still needs a manual edit: once the tail is orphaned nothing distinguishes it from real
   config, so repairing it automatically would risk deleting keys.
-
-### Added
-
-- **`llmtrim setup --env` creates CA files (if needed) and prints envvars** When this option is
-  used, setup ensures the local CA (and, on POSIX, the combined OS-trust bundle) exist, then
-  prints an evaluatable snippet — `export` lines on POSIX, `$env:` assignments on Windows — to
-  wire the interceptor into your current shell.
-
-### Fixed
-
-- **The managed shell-profile block now single-quotes its values.** `setup` interpolated the proxy
-  URL and CA paths into bare double quotes, so a home directory or CA path containing `"`, `$`, a
-  backtick or a backslash produced a profile line that broke or expanded at shell start. Values
-  are now emitted as inert single-quoted literals on both the POSIX and PowerShell paths, matching
-  the quoting `setup --env` already used. Re-run `llmtrim setup` to rewrite an existing block.
 
 ## [0.11.4] - 2026-07-18
 
@@ -1256,7 +1256,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.5...HEAD
+[0.11.5]: https://github.com/fkiene/llmtrim/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/fkiene/llmtrim/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/fkiene/llmtrim/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/fkiene/llmtrim/compare/v0.11.1...v0.11.2
