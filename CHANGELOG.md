@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Always-sub can skip Anthropic `/login`.** With global `sub` in `always` mode, llmtrim
+  injects a dummy `ANTHROPIC_AUTH_TOKEN` into `~/.claude/settings.json` (same idea as
+  claude-code-proxy) so Claude Code does not need a live Anthropic OAuth session. The MITM
+  strips the dummy credential, injects the real Grok/Codex/Kimi token, and answers non-messages
+  Anthropic probes locally (with request-body drain so keep-alive stays healthy). Trade-off:
+  Claude Code disables claude.ai connectors while any API-key auth is set. Opt out with
+  `llmtrim sub anthropic-login keep` (connectors work again; Anthropic `/login` required when
+  OAuth expires). Window `/sub off` under skip-login returns a clear error instead of a bare
+  Anthropic 401.
+
+### Fixed
+
+- **Guard no longer echoes nested prompts and reinjects blocked drafts.** Nested Claude Code
+  prompt echoes are suppressed; a blocked draft is reinjected so the user does not lose the
+  text they were about to send.
+
 ## [0.11.7] - 2026-07-22
 
 ### Fixed
