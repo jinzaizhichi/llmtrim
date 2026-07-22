@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.8] - 2026-07-22
+
 ### Added
 
 - **Always-sub can skip Anthropic `/login`.** With global `sub` in `always` mode, llmtrim
@@ -1325,7 +1327,8 @@ bill, never a broken call.
   (6 targets with SLSA build provenance), CI on Linux/macOS/Windows with secret
   scanning, license compliance, and MSRV gates.
 
-[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.7...HEAD
+[Unreleased]: https://github.com/fkiene/llmtrim/compare/v0.11.8...HEAD
+[0.11.8]: https://github.com/fkiene/llmtrim/compare/v0.11.7...v0.11.8
 [0.11.7]: https://github.com/fkiene/llmtrim/compare/v0.11.6...v0.11.7
 [0.11.6]: https://github.com/fkiene/llmtrim/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/fkiene/llmtrim/compare/v0.11.4...v0.11.5
