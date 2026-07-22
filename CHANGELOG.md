@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Upstream transport resets are retried and recorded instead of becoming silent zero-output rows.**
+  Stale keep-alive connections to subscription backends (especially Grok) used to surface as hyper
+  `SendRequest: connection reset` and land in the ledger as anonymous `out=0` rows. The outbound
+  client now expires idle pool sockets after a short timeout (with hyper-util's `pool_timer` wired
+  so the timeout actually fires), retries once when the request body is still available to replay,
+  logs session/model on every transport failure, and records `outcome=transport_reset` rather than
+  a silent zero-output row.
+
 ## [0.11.5] - 2026-07-20
 
 ### Added
